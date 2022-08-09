@@ -1,4 +1,6 @@
 import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { MODULE_OPTIONS_TOKEN } from './storage.module-definition';
+import { StorageModuleOptions } from './interfaces';
 import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
@@ -9,22 +11,18 @@ import {
   PutObjectCommandOutput,
   S3Client,
 } from '@aws-sdk/client-s3';
-import { MODULE_OPTIONS_TOKEN } from './storage.module-definition';
-import { StorageModuleOptions } from './interfaces';
-import * as fs from 'fs';
 import { Upload } from '@aws-sdk/lib-storage';
+import * as fs from 'fs';
+import * as path from 'path';
 import * as stream from 'stream';
 import { PassThrough, Readable } from 'stream';
-
-interface testO {
-  [key: string]: string | testO;
-}
 
 @Injectable()
 export class StorageService implements OnModuleInit, OnModuleDestroy {
   private s3Client: S3Client | undefined;
 
   private readonly useFileSystem: boolean = false;
+  private readonly prefix: string;
   private readonly endpoint?: string;
   private readonly region?: string;
   private readonly bucket?: string;
@@ -45,45 +43,12 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         this.useFileSystem = true;
         break;
     }
+
+    this.prefix = options.prefix ?? '';
   }
 
-  get client() {
+  get s3client() {
     return this.s3Client;
-  }
-
-  get useCloud() {
-    return !this.useFileSystem;
-  }
-
-  async createTest(test: testO, location: string) {
-    for (const [key, data] of Object.entries(test)) {
-      if (typeof data === 'string') {
-        await this.writeFile(this.normalizeKey(location + key), data);
-      } else {
-        await this.mkdir(this.normalizeDirKey(location + key));
-        await this.createTest(data, this.normalizeDirKey(location + key));
-      }
-    }
-  }
-
-  async readTest(test: testO, location: string) {
-    for (const [key, data] of Object.entries(test)) {
-      if (typeof data === 'string') {
-      } else {
-        await this.readTest(data, this.normalizeDirKey(location + key));
-      }
-    }
-  }
-
-  async deleteTest(test: testO, location: string) {
-    for (const [key, data] of Object.entries(test)) {
-      if (typeof data === 'string') {
-        await this.rm(this.normalizeKey(location + key));
-      } else {
-        await this.deleteTest(data, this.normalizeDirKey(location + key));
-        await this.rmdir(this.normalizeDirKey(location + key));
-      }
-    }
   }
 
   async onModuleInit() {
@@ -97,46 +62,6 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         },
       });
     }
-
-    // const test: testO = {
-    //   fl1n1: {
-    //     fl2n1: { fl3n1: 'fl3n1' },
-    //     fl2n2: { fl3n1: 'fl3n1', fl3n2: 'fl3n2' },
-    //     fl2n3: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3' },
-    //     fl2n4: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3', fl3n4: 'fl3n4' },
-    //     fl2n5: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3', fl3n4: 'fl3n4', fl3n5: 'fl3n5' },
-    //     fl2n6: 'fl2n6',
-    //   },
-    //   fl1n2: {
-    //     fl2n1: 'fl2n1',
-    //     fl2n2: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3', fl3n4: 'fl3n4', fl3n5: 'fl3n5' },
-    //     fl2n3: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3', fl3n4: 'fl3n4' },
-    //     fl2n4: { fl3n1: 'fl3n1', fl3n2: 'fl3n2', fl3n3: 'fl3n3' },
-    //     fl2n5: { fl3n1: 'fl3n1', fl3n2: 'fl3n2' },
-    //     fl2n6: { fl3n1: 'fl3n1' },
-    //   },
-    //   fl1n3: {
-    //     fl2n1: 'fl2n1',
-    //     fl2n2: 'fl2n2',
-    //     fl2n3: 'fl2n3',
-    //     fl2n4: 'fl2n4',
-    //     fl2n5: 'fl2n5',
-    //     fl2n6: 'fl2n6',
-    //   },
-    //   fl1n4: {
-    //     fl2n1: {},
-    //     fl2n2: { fl3n1: { fl4n1: 'fl4n1' } },
-    //     fl2n3: { fl3n1: { fl4n1: { fl5n1: 'fl5n1' } } },
-    //     fl2n4: { fl3n1: { fl4n1: { fl5n1: { fl6n1: 'fl6n1' } } } },
-    //     fl2n5: { fl3n1: { fl4n1: { fl5n1: { fl6n1: { fl7n1: 'fl7n1' } } } } },
-    //     fl2n6: { fl3n1: { fl4n1: { fl5n1: { fl6n1: { fl7n1: { fl8n1: 'fl8n1' } } } } } },
-    //   },
-    //   fl1n5: 'fl1n5',
-    // };
-
-    // console.log(await this.createTest(test, process.cwd() + '/testDir1/'));
-    // console.log(await this.readTest(test, process.cwd() + '/testDir1/'));
-    // console.log(await this.deleteTest(test, process.cwd() + '/testDir1/'));
   }
 
   async onModuleDestroy() {
@@ -153,7 +78,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async mkdir(folderPath: string, bucket?: string): Promise<PutObjectCommandOutput | string | undefined> {
     if (this.useFileSystem) {
-      return fs.promises.mkdir(folderPath, { recursive: true });
+      return fs.promises.mkdir(path.join(this.prefix, folderPath), { recursive: true });
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -167,7 +92,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async readdir(folderPath: string, bucket?: string): Promise<string[]> {
     if (this.useFileSystem) {
-      return fs.promises.readdir(folderPath);
+      return fs.promises.readdir(path.join(this.prefix, folderPath));
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -199,7 +124,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async rmdir(folderPath: string, bucket?: string): Promise<void> {
     if (this.useFileSystem) {
-      return fs.promises.rm(folderPath, { recursive: true });
+      return fs.promises.rm(path.join(this.prefix, folderPath), { recursive: true });
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -223,16 +148,16 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async exists(path: string, bucket?: string): Promise<boolean> {
+  async exists(_path: string, bucket?: string): Promise<boolean> {
     if (this.useFileSystem) {
-      return fs.existsSync(path);
+      return fs.existsSync(path.join(this.prefix, _path));
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
       }
 
       return this.s3Client!.send(
-        new ListObjectsCommand({ Bucket: bucket, Delimiter: '/', Prefix: this.normalizeKey(path) }),
+        new ListObjectsCommand({ Bucket: bucket, Delimiter: '/', Prefix: this.normalizeKey(_path) }),
       ).then((output: ListObjectsCommandOutput) => {
         if (output.Contents && output.Prefix) {
           for (const content of output.Contents) {
@@ -252,7 +177,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async readFile(filePath: string, bucket?: string): Promise<Buffer> {
     if (this.useFileSystem) {
-      return fs.promises.readFile(filePath);
+      return fs.promises.readFile(path.join(this.prefix, filePath));
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -275,7 +200,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async writeFile(filePath: string, data: string | Buffer, bucket?: string): Promise<void> {
     if (this.useFileSystem) {
-      return fs.promises.writeFile(filePath, data);
+      return fs.promises.writeFile(path.join(this.prefix, filePath), data);
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -290,7 +215,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   async rm(filePath: string, bucket?: string): Promise<void> {
     if (this.useFileSystem) {
-      return fs.promises.rm(filePath);
+      return fs.promises.rm(path.join(this.prefix, filePath));
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;
@@ -310,7 +235,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (this.useFileSystem) {
-      return fs.createWriteStream(filePath, options);
+      return fs.createWriteStream(path.join(this.prefix, filePath), options);
     } else {
       if (typeof bucket !== 'string') {
         bucket = this.bucket;

@@ -1,6 +1,6 @@
 {
     "name": "nestjs-multi-storage",
-    "version": "0.0.3",
+    "version": "0.0.4",
     "description": "A multi-storage filesystem manager for NestJS, based on fs function names",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
