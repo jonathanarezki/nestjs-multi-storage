@@ -233,19 +233,15 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         bucket = this.bucket;
       }
 
-      const readable = new stream.Readable();
+      const pass = new stream.PassThrough();
 
       this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) })).then((data) => {
         const _stream = data.Body as Readable;
-        _stream.on('data', (chunk) => readable.push(chunk));
-        _stream.on('end', () => readable.emit('end'));
-        _stream.on('error', (error) => {
-          readable.emit('error');
-          console.error(error);
-        });
+        _stream.on('data', (chunk) => pass.push(chunk));
+        _stream.on('end', () => pass.end());
       });
 
-      return readable;
+      return pass;
     }
   }
 
