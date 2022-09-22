@@ -225,6 +225,30 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  createReadStream(filePath: string, bucket?: string): fs.ReadStream | Readable {
+    if (this.useFileSystem) {
+      return fs.createReadStream(path.join(this.prefix, filePath));
+    } else {
+      if (typeof bucket !== 'string') {
+        bucket = this.bucket;
+      }
+
+      const readable = new stream.Readable();
+
+      this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) })).then((data) => {
+        const _stream = data.Body as Readable;
+        _stream.on('data', (chunk) => readable.push(chunk));
+        _stream.on('end', () => readable.emit('end'));
+        _stream.on('error', (error) => {
+          readable.emit('error');
+          console.error(error);
+        });
+      });
+
+      return readable;
+    }
+  }
+
   createWriteStream(
     filePath: string,
     options = { highWaterMark: 1024 * 1024 * 10 },
