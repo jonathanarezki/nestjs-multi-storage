@@ -6,6 +6,7 @@ import {
   DeleteObjectsCommand,
   GetObjectCommand,
   ListObjectsCommand,
+  ListObjectsCommandInput,
   ListObjectsCommandOutput,
   PutObjectCommand,
   PutObjectCommandOutput,
@@ -69,11 +70,11 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
   }
 
   private normalizeDirKey(key: string) {
-    return `${key}/`.replace(/\\+/g, '/').replace(/\/+/g, '/').replace(/^\//, '/');
+    return `${path.normalize(key)}/`.replace(/\\+/g, '/').replace(/\/+/g, '/').replace(/^\//, '/');
   }
 
   private normalizeKey(key: string) {
-    return key.replace(/\\+/g, '/').replace(/\/+/g, '/').replace(/^\//, '/').replace(/\/+$/, '');
+    return path.normalize(key).replace(/\\+/g, '/').replace(/\/+/g, '/').replace(/^\//, '/').replace(/\/+$/, '');
   }
 
   async mkdir(folderPath: string, bucket?: string): Promise<PutObjectCommandOutput | string | undefined> {
@@ -98,27 +99,53 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         bucket = this.bucket;
       }
 
-      return this.s3Client!.send(
-        new ListObjectsCommand({ Bucket: bucket, Delimiter: '/', Prefix: this.normalizeDirKey(folderPath) }),
-      ).then((output: ListObjectsCommandOutput) => {
-        const list: string[] = [];
+      const bucketParams: ListObjectsCommandInput = {
+        Bucket: bucket,
+        Delimiter: '/',
+        Prefix: this.normalizeDirKey(folderPath),
+      };
+      const list: string[] = [];
 
-        output.Contents?.forEach((content) => {
-          const key = content.Key?.replace(output.Prefix ?? '', '').replace(/\/+$/, '') ?? '';
-          if (key.length) {
-            list.push(key);
-          }
-        });
+      // Declare truncated as a flag that the while loop is based on.
+      let truncated = true;
+      // Declare a variable to which the key of the last element is assigned to in the response.
+      let pageMarker;
+      // while loop that runs until 'response.truncated' is false.
+      while (truncated) {
+        try {
+          await this.s3Client!.send(new ListObjectsCommand(bucketParams)).then((output: ListObjectsCommandOutput) => {
+            output.Contents?.forEach((content) => {
+              const key = content.Key?.replace(output.Prefix ?? '', '').replace(/\/+$/, '') ?? '';
+              if (key.length) {
+                list.push(key);
+              }
+            });
 
-        output.CommonPrefixes?.forEach((prefix) => {
-          const key = prefix.Prefix?.replace(output.Prefix ?? '', '').replace(/\/+$/, '') ?? '';
-          if (key.length) {
-            list.push(key);
-          }
-        });
+            output.CommonPrefixes?.forEach((prefix) => {
+              const key = prefix.Prefix?.replace(output.Prefix ?? '', '').replace(/\/+$/, '') ?? '';
+              if (key.length) {
+                list.push(key);
+              }
+            });
 
-        return list.sort();
-      });
+            truncated = output.IsTruncated ?? false;
+
+            if (truncated && output.Contents) {
+              pageMarker = output.Contents.slice(-1)[0].Key;
+              if (pageMarker) {
+                bucketParams.Marker = pageMarker;
+              } else {
+                truncated = false;
+              }
+            }
+          });
+        } catch (err) {
+          console.log('Error', err);
+          truncated = false;
+        }
+      }
+
+      return list.sort();
     }
   }
 
