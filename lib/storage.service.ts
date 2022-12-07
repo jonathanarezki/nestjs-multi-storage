@@ -183,22 +183,22 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         bucket = this.bucket;
       }
 
-      return this.s3Client!.send(
-        new ListObjectsCommand({ Bucket: bucket, Delimiter: '/', Prefix: this.normalizeKey(_path) }),
-      ).then((output: ListObjectsCommandOutput) => {
-        if (output.Contents && output.Prefix) {
-          for (const content of output.Contents) {
-            if (content.Key === output.Prefix) {
-              return true;
-            }
-            if (content.Key === output.Prefix + '/') {
-              return true;
+      return this.s3Client!.send(new ListObjectsCommand({ Bucket: bucket, Prefix: this.normalizeKey(_path) })).then(
+        (output: ListObjectsCommandOutput) => {
+          if (output.Contents && output.Prefix) {
+            for (const content of output.Contents) {
+              if (content.Key === output.Prefix) {
+                return true;
+              }
+              if (content.Key === output.Prefix + '/') {
+                return true;
+              }
             }
           }
-        }
 
-        return false;
-      });
+          return false;
+        },
+      );
     }
   }
 
