@@ -231,8 +231,11 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
             expiresIn: 60,
           },
         ).then(async (result) => {
-          result = result.replace(this.endpoint!, this.endpointCDN!);
-          return fetch(result)
+          const path = result.replace(
+            this.endpoint!.replace(/(^\w+:|^)\/\//, ''),
+            this.endpointCDN!.replace(/(^\w+:|^)\/\//, ''),
+          );
+          return fetch(path)
             .then((response) => response.buffer())
             .catch((error) => {
               throw error;
