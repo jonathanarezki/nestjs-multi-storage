@@ -13,10 +13,12 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as stream from 'stream';
 import { PassThrough, Readable } from 'stream';
+import * as fetch from 'node-fetch';
 
 @Injectable()
 export class StorageService implements OnModuleInit, OnModuleDestroy {
@@ -25,6 +27,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
   private readonly useFileSystem: boolean = false;
   private readonly prefix: string;
   private readonly endpoint?: string;
+  private readonly endpointCDN?: string;
   private readonly region?: string;
   private readonly bucket?: string;
   private readonly accessKeyId?: string;
@@ -34,6 +37,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     switch (options.type) {
       case 's3':
         this.endpoint = options.endpoint;
+        this.endpointCDN = options.endpointCDN;
         this.region = options.region;
         this.bucket = options.bucket;
         this.accessKeyId = options.accessKeyId;
@@ -219,9 +223,26 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         });
       };
 
-      return this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) })).then(
-        (data) => streamToBuffer(data.Body as Readable),
-      );
+      if (this.endpointCDN) {
+        return getSignedUrl(
+          this.s3Client as any,
+          new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) }) as any,
+          {
+            expiresIn: 60,
+          },
+        ).then(async (result) => {
+          result = result.replace(this.endpoint!, this.endpointCDN!);
+          return fetch(result)
+            .then((response) => response.buffer())
+            .catch((error) => {
+              throw error;
+            });
+        });
+      } else {
+        return this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) })).then(
+          (data) => streamToBuffer(data.Body as Readable),
+        );
+      }
     }
   }
 

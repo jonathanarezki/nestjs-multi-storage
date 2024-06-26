@@ -1,6 +1,6 @@
 {
     "name": "nestjs-multi-storage",
-    "version": "0.0.9",
+    "version": "0.0.10",
     "description": "A multi-storage filesystem manager for NestJS, based on fs function names",
     "main": "dist/index.js",
     "types": "dist/index.d.ts",
@@ -32,12 +32,14 @@
         "test:e2e:dev": "jest --config ./tests/jest-e2e.json --runInBand --watch"
     },
     "dependencies": {
-        "@aws-sdk/client-s3": "^3.142.0",
-        "@aws-sdk/lib-storage": "^3.142.0",
+        "@aws-sdk/client-s3": "^3.600.0",
+        "@aws-sdk/lib-storage": "^3.600.0",
+        "@aws-sdk/s3-request-presigner": "^3.600.0",
         "@nestjs/common": "^9.0.8 || ^10.0.0"
     },
     "devDependencies": {
-        "@types/node": "^16.11.47",
+        "@types/node": "^18.19.39",
+        "@types/node-fetch": "2.6.11",
         "eslint": "^8.21.0",
         "eslint-config-prettier": "^8.5.0",
         "eslint-plugin-prettier": "^4.2.1",
