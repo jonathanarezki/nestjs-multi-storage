@@ -62,6 +62,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       this.s3Client = new S3Client({
         endpoint: this.endpoint,
         region: this.region,
+        forcePathStyle: this.endpoint?.startsWith('http://') ?? false,
         credentials: {
           accessKeyId: this.accessKeyId,
           secretAccessKey: this.secretAccessKey,
