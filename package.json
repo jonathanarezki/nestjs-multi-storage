@@ -1,54 +1,54 @@
 {
-    "name": "nestjs-multi-storage",
-    "version": "0.2.0",
-    "description": "A multi-storage filesystem manager for NestJS, based on fs function names",
-    "main": "dist/index.js",
-    "types": "dist/index.d.ts",
-    "keywords": [
-        "nestjs-storage",
-        "nestjs-filesystem",
-        "nestjs-s3"
-    ],
-    "repository": {
-        "type": "git",
-        "url": "https://github.com/jonathanarezki/nestjs-multi-storage.git"
-    },
-    "bugs": {
-        "url": "https://github.com/jonathanarezki/nestjs-multi-storage/issues"
-    },
-    "homepage": "https://github.com/jonathanarezki/nestjs-multi-storage",
-    "author": "Jonathan Arezki <arezki@webbar.dev>",
-    "private": false,
-    "license": "MIT",
-    "scripts": {
-        "build": "tsc -p tsconfig.json",
-        "format": "prettier --write \"**/*.ts\"",
-        "lint": "eslint 'lib/**/*.ts' --fix",
-        "prepublish:npm": "npm run build",
-        "publish:npm": "npm publish --access public",
-        "prepublish:next": "npm run build",
-        "publish:next": "npm publish --access public --tag next",
-        "test:e2e": "jest --config ./tests/jest-e2e.json --runInBand",
-        "test:e2e:dev": "jest --config ./tests/jest-e2e.json --runInBand --watch"
-    },
-    "dependencies": {
-        "@aws-sdk/client-s3": "^3.600.0",
-        "@aws-sdk/lib-storage": "^3.600.0",
-        "@aws-sdk/s3-request-presigner": "^3.600.0",
-        "@nestjs/common": "^11.0.0"
-    },
-    "devDependencies": {
-        "@types/node": "^18.19.39",
-        "@types/node-fetch": "2.6.11",
-        "eslint": "^8.21.0",
-        "eslint-config-prettier": "^8.5.0",
-        "eslint-plugin-prettier": "^4.2.1",
-        "reflect-metadata": "^0.1.13",
-        "prettier": "^2.7.1",
-        "typescript": "^5.8.2"
-    },
-    "peerDependencies": {
-        "@nestjs/common": "^9.0.0 || ^10.0.0",
-        "@nestjs/core": "^9.0.0 || ^10.0.0"
-    }
+  "name": "nestjs-multi-storage",
+  "version": "0.3.0",
+  "description": "A multi-storage filesystem manager for NestJS, based on fs function names",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "nestjs-storage",
+    "nestjs-filesystem",
+    "nestjs-s3"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jonathanarezki/nestjs-multi-storage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jonathanarezki/nestjs-multi-storage/issues"
+  },
+  "homepage": "https://github.com/jonathanarezki/nestjs-multi-storage",
+  "author": "Jonathan Arezki <arezki@webbar.dev>",
+  "private": false,
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "format": "prettier --write \"**/*.ts\"",
+    "lint": "eslint 'lib/**/*.ts' --fix",
+    "prepublish:npm": "npm run build",
+    "publish:npm": "npm publish --access public",
+    "prepublish:next": "npm run build",
+    "publish:next": "npm publish --access public --tag next",
+    "test:e2e": "jest --config ./tests/jest-e2e.json --runInBand",
+    "test:e2e:dev": "jest --config ./tests/jest-e2e.json --runInBand --watch"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.600.0",
+    "@aws-sdk/lib-storage": "^3.600.0",
+    "@aws-sdk/s3-request-presigner": "^3.600.0",
+    "@nestjs/common": "11.0.16"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.39",
+    "@types/node-fetch": "2.6.11",
+    "eslint": "^8.21.0",
+    "eslint-config-prettier": "^8.5.0",
+    "eslint-plugin-prettier": "^4.2.1",
+    "reflect-metadata": "^0.1.13",
+    "prettier": "^2.7.1",
+    "typescript": "^5.8.2"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0"
+  }
 }

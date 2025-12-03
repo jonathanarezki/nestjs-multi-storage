@@ -5,6 +5,7 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  HeadObjectCommand,
   ListObjectsCommand,
   ListObjectsCommandInput,
   ListObjectsCommandOutput,
@@ -179,30 +180,28 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async exists(_path: string, bucket?: string): Promise<boolean> {
+  async exists(p: string, bucket?: string): Promise<boolean> {
     if (this.useFileSystem) {
-      return fs.existsSync(path.join(this.prefix, _path));
-    } else {
-      if (typeof bucket !== 'string') {
-        bucket = this.bucket;
-      }
+      return fs.existsSync(path.join(this.prefix, p));
+    }
 
-      return this.s3Client!.send(new ListObjectsCommand({ Bucket: bucket, Prefix: this.normalizeKey(_path) })).then(
-        (output: ListObjectsCommandOutput) => {
-          if (output.Contents && output.Prefix) {
-            for (const content of output.Contents) {
-              if (content.Key === output.Prefix) {
-                return true;
-              }
-              if (content.Key === output.Prefix + '/') {
-                return true;
-              }
-            }
-          }
+    bucket ??= this.bucket;
 
+    const key = this.normalizeKey(p);
+
+    try {
+      await this.s3Client!.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return true;
+    } catch (e: any) {
+      if (e?.$metadata?.httpStatusCode === 404) {
+        try {
+          await this.s3Client!.send(new HeadObjectCommand({ Bucket: bucket, Key: this.normalizeDirKey(p) }));
+          return true;
+        } catch {
           return false;
-        },
-      );
+        }
+      }
+      throw e;
     }
   }
 
@@ -264,6 +263,52 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  public async getSignedUrl(
+    filePath: string,
+    opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string },
+  ): Promise<string> {
+    if (this.useFileSystem) {
+      throw new Error('Signed URLs are not supported for filesystem storage.');
+    }
+
+    const bucket = opts?.bucket ?? this.bucket!;
+    const command = new GetObjectCommand({
+      Bucket: bucket,
+      Key: this.normalizeKey(filePath),
+      ResponseContentDisposition: opts?.responseContentDisposition,
+    });
+
+    const url = await getSignedUrl(this.s3Client!, command, { expiresIn: opts?.expiresIn ?? 60 });
+
+    if (this.endpointCDN && this.endpoint) {
+      return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
+    }
+    return url;
+  }
+
+  public async getSignedPutUrl(
+    filePath: string,
+    opts?: { bucket?: string; expiresIn?: number; contentType?: string },
+  ): Promise<string> {
+    if (this.useFileSystem) {
+      throw new Error('Signed URLs are not supported for filesystem storage.');
+    }
+
+    const bucket = opts?.bucket ?? this.bucket!;
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: this.normalizeKey(filePath),
+      ContentType: opts?.contentType,
+    });
+
+    const url = await getSignedUrl(this.s3Client!, command, { expiresIn: opts?.expiresIn ?? 60 });
+
+    if (this.endpointCDN && this.endpoint) {
+      return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
+    }
+    return url;
+  }
+
   async rm(filePath: string, bucket?: string): Promise<void> {
     if (this.useFileSystem) {
       return fs.promises.rm(path.join(this.prefix, filePath));
@@ -276,56 +321,53 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  createReadStream(filePath: string, bucket?: string): fs.ReadStream | Readable {
+  createReadStream(filePath: string, opts?: { start?: number; end?: number }, bucket?: string): Readable {
     if (this.useFileSystem) {
-      return fs.createReadStream(path.join(this.prefix, filePath));
-    } else {
-      if (typeof bucket !== 'string') {
-        bucket = this.bucket;
-      }
-
-      const pass = new stream.PassThrough();
-
-      this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) })).then((data) => {
-        const _stream = data.Body as Readable;
-        _stream.on('data', (chunk) => pass.push(chunk));
-        _stream.on('end', () => pass.end());
-      });
-
-      return pass;
+      return fs.createReadStream(path.join(this.prefix, filePath), opts as any);
     }
+
+    bucket ??= this.bucket;
+
+    const Range =
+      typeof opts?.start === 'number' || typeof opts?.end === 'number'
+        ? `bytes=${opts?.start ?? 0}-${typeof opts?.end === 'number' ? opts.end : ''}`
+        : undefined;
+
+    const pass = new PassThrough();
+
+    this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath), Range }))
+      .then(({ Body }) => (Body as Readable).pipe(pass))
+      .catch((err) => pass.destroy(err));
+
+    return pass;
   }
 
   createWriteStream(
     filePath: string,
-    options = { highWaterMark: 1024 * 1024 * 10 },
+    options?: { highWaterMark?: number; partSize?: number; queueSize?: number },
     bucket?: string,
-  ): fs.WriteStream | PassThrough {
-    if (options.highWaterMark < 1024 * 1024 * 5) {
-      throw new Error('Option: highWaterMark is smaller than the minimum size of 5MB');
-    }
-
+  ) {
     if (this.useFileSystem) {
-      return fs.createWriteStream(path.join(this.prefix, filePath), options);
-    } else {
-      if (typeof bucket !== 'string') {
-        bucket = this.bucket;
-      }
-
-      const pass = new stream.PassThrough();
-
-      const upload = new Upload({
-        client: this.s3Client!,
-        params: { Bucket: bucket, Key: this.normalizeKey(filePath), Body: pass },
-
-        queueSize: 4, // optional concurrency configuration
-        partSize: options.highWaterMark, // optional size of each part, in bytes, at least 5MB
-        leavePartsOnError: false, // optional manually handle dropped parts
-      });
-
-      upload.done().then();
-
-      return pass;
+      return fs.createWriteStream(path.join(this.prefix, filePath), options as any);
     }
+
+    bucket ??= this.bucket;
+
+    const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
+
+    const upload = new Upload({
+      client: this.s3Client!,
+      params: { Bucket: bucket, Key: this.normalizeKey(filePath), Body: pass },
+      queueSize: options?.queueSize ?? 4,
+      partSize: Math.max(options?.partSize ?? 5 * 1024 * 1024, 5 * 1024 * 1024),
+      leavePartsOnError: false,
+    });
+
+    upload.done().then(
+      () => pass.emit('finish'),
+      (err) => pass.destroy(err),
+    );
+
+    return pass;
   }
 }
