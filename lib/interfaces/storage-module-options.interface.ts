@@ -3,6 +3,7 @@ export interface StorageModuleOptions {
   endpoint?: string;
   endpointCDN?: string;
   region?: string;
+  forcePathStyle?: boolean;
   bucket?: string;
   accessKeyId?: string;
   secretAccessKey?: string;

@@ -30,6 +30,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
   private readonly endpoint?: string;
   private readonly endpointCDN?: string;
   private readonly region?: string;
+  private readonly forcePathStyle?: boolean;
   private readonly bucket?: string;
   private readonly accessKeyId?: string;
   private readonly secretAccessKey?: string;
@@ -40,6 +41,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         this.endpoint = options.endpoint;
         this.endpointCDN = options.endpointCDN;
         this.region = options.region;
+        this.forcePathStyle = options.forcePathStyle;
         this.bucket = options.bucket;
         this.accessKeyId = options.accessKeyId;
         this.secretAccessKey = options.secretAccessKey;
@@ -62,7 +64,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       this.s3Client = new S3Client({
         endpoint: this.endpoint,
         region: this.region,
-        forcePathStyle: this.endpoint?.startsWith('http://') ?? false,
+        forcePathStyle: this.forcePathStyle ?? undefined,
         credentials: {
           accessKeyId: this.accessKeyId,
           secretAccessKey: this.secretAccessKey,
