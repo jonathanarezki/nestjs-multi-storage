@@ -20,6 +20,7 @@ import * as path from 'path';
 import * as stream from 'stream';
 import { PassThrough, Readable } from 'stream';
 import * as fetch from 'node-fetch';
+import * as mime from 'mime-types';
 
 @Injectable()
 export class StorageService implements OnModuleInit, OnModuleDestroy {
@@ -251,7 +252,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async writeFile(filePath: string, data: string | Buffer, bucket?: string): Promise<void> {
+  async writeFile(filePath: string, data: string | Buffer, bucket?: string, mimetype?: string): Promise<void> {
     if (this.useFileSystem) {
       return fs.promises.writeFile(path.join(this.prefix, filePath), data);
     } else {
@@ -262,13 +263,23 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       if (typeof data === 'string') {
         data = Buffer.from(data);
       }
-      await this.s3Client!.send(new PutObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath), Body: data }));
+
+      const contentType = mimetype || mime.lookup(filePath) || undefined;
+
+      await this.s3Client!.send(
+        new PutObjectCommand({
+          Bucket: bucket,
+          Key: this.normalizeKey(filePath),
+          Body: data,
+          ContentType: contentType,
+        }),
+      );
     }
   }
 
   public async getSignedUrl(
     filePath: string,
-    opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string },
+    opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string; responseContentType?: string },
   ): Promise<string> {
     if (this.useFileSystem) {
       throw new Error('Signed URLs are not supported for filesystem storage.');
@@ -279,6 +290,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       Bucket: bucket,
       Key: this.normalizeKey(filePath),
       ResponseContentDisposition: opts?.responseContentDisposition,
+      ResponseContentType: opts?.responseContentType,
     });
 
     const url = await getSignedUrl(this.s3Client!, command, { expiresIn: opts?.expiresIn ?? 60 });
@@ -347,7 +359,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
   createWriteStream(
     filePath: string,
-    options?: { highWaterMark?: number; partSize?: number; queueSize?: number },
+    options?: { highWaterMark?: number; partSize?: number; queueSize?: number; contentType?: string },
     bucket?: string,
   ) {
     if (this.useFileSystem) {
@@ -360,7 +372,12 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
     const upload = new Upload({
       client: this.s3Client!,
-      params: { Bucket: bucket, Key: this.normalizeKey(filePath), Body: pass },
+      params: {
+        Bucket: bucket,
+        Key: this.normalizeKey(filePath),
+        Body: pass,
+        ContentType: options?.contentType || mime.lookup(filePath) || undefined,
+      },
       queueSize: options?.queueSize ?? 4,
       partSize: Math.max(options?.partSize ?? 5 * 1024 * 1024, 5 * 1024 * 1024),
       leavePartsOnError: false,
