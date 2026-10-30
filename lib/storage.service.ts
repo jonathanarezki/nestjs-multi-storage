@@ -21,10 +21,13 @@ import {
   DeleteObjectCommand,
   DeleteObjectsCommand,
   GetObjectCommand,
+  GetObjectTaggingCommand,
   HeadObjectCommand,
   HeadObjectCommandOutput,
   ListObjectsV2Command,
   ListObjectsV2CommandInput,
+  ObjectStorageClass,
+  StorageClass,
   PutObjectCommand,
   S3Client,
   UploadPartCopyCommand,
@@ -36,15 +39,7 @@ import * as path from 'path';
 import * as stream from 'stream';
 import { PassThrough, Readable, Writable } from 'stream';
 import * as mime from 'mime-types';
-
-const FS_ERRORS = {
-  ENOENT: [-2, 'no such file or directory'],
-  EEXIST: [-17, 'file already exists'],
-  ENOTDIR: [-20, 'not a directory'],
-  EISDIR: [-21, 'illegal operation on a directory'],
-  EINVAL: [-22, 'invalid argument'],
-  ENOTEMPTY: [-39, 'directory not empty'],
-} as const;
+import { FS_ERRORS, StorageError, StorageErrorCode } from './storage-error';
 
 @Injectable()
 export class StorageService implements OnModuleInit, OnModuleDestroy {
@@ -126,8 +121,12 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         endpoint: this.endpoint,
         region: this.region,
         forcePathStyle: this.forcePathStyle ?? undefined,
-        requestChecksumCalculation: this.options.requestChecksumCalculation,
-        responseChecksumValidation: this.options.responseChecksumValidation,
+        // Custom endpoints (MinIO, R2, ...) often reject the SDK's default checksums: default to WHEN_REQUIRED there.
+        // An explicit option always wins; on plain AWS the SDK defaults apply.
+        requestChecksumCalculation:
+          this.options.requestChecksumCalculation ?? (this.endpoint ? 'WHEN_REQUIRED' : undefined),
+        responseChecksumValidation:
+          this.options.responseChecksumValidation ?? (this.endpoint ? 'WHEN_REQUIRED' : undefined),
         credentials:
           this.accessKeyId && this.secretAccessKey
             ? { accessKeyId: this.accessKeyId, secretAccessKey: this.secretAccessKey }
@@ -401,21 +400,21 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     } while (ContinuationToken);
   }
 
-  private fsError(code: keyof typeof FS_ERRORS, syscall: string, p?: string, dest?: string) {
+  private fsError(code: Exclude<StorageErrorCode, 'ERR_FS_EISDIR'>, syscall: string, p?: string, dest?: string) {
     const [errno, description] = FS_ERRORS[code];
-    const error: NodeJS.ErrnoException = new Error(
-      `${code}: ${description}, ${syscall}${p === undefined ? '' : ` '${p}'`}${
-        dest === undefined ? '' : ` -> '${dest}'`
-      }`,
+    const error: StorageError = Object.assign(
+      new Error(
+        `${code}: ${description}, ${syscall}${p === undefined ? '' : ` '${p}'`}${
+          dest === undefined ? '' : ` -> '${dest}'`
+        }`,
+      ),
+      { code: code as string, errno, syscall },
     );
-    error.code = code;
-    error.errno = errno;
-    error.syscall = syscall;
     if (p !== undefined) {
       error.path = p;
     }
     if (dest !== undefined) {
-      (error as any).dest = dest;
+      error.dest = dest;
     }
     return error;
   }
@@ -573,15 +572,51 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       return { file };
     }
 
-    const marker = await this.headObject(bucket, dirKey);
-    if (marker) {
-      return { dir: { mtime: marker.LastModified } };
+    // One LIST for marker and implicit folder: the marker key is the shortest key with this prefix, so it sorts first
+    const first = await this.listFirst(bucket, dirKey);
+    if (!first) {
+      return undefined;
     }
+    return { dir: first.Key === dirKey ? { mtime: first.LastModified } : {} };
+  }
 
-    for await (const output of this.listObjects({ Bucket: bucket, Prefix: dirKey, MaxKeys: 1 })) {
-      return output.Contents?.length ? { dir: {} } : undefined;
+  /**
+   * Whether `p` is a folder (marker or implicit): any key below it. A failure (an invalid path, ...) only surfaces when
+   * the result is awaited, which is what lets callers start this lookup early and still report errors in fs order.
+   */
+  private isFolder(bucket: string | undefined, p: string): Promise<boolean> {
+    const lookup = (async () => !!(await this.listFirst(bucket, this.normalizeDirKey(p))))();
+    lookup.catch(() => undefined);
+    return lookup;
+  }
+
+  /** The first object key (UTF-8 byte order) that starts with `prefix`, if any. */
+  private async listFirst(bucket: string | undefined, prefix: string) {
+    const output = await this.s3Client!.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 1 }));
+    return output.Contents?.[0];
+  }
+
+  /**
+   * Like `s3Entry`, for the source of a copy or rename: a file is found with one LIST (the exact key is the shortest
+   * key with that prefix, so it comes first) that also returns its size and storage class. Anything else (a folder,
+   * a missing path, the bucket root) falls back to `s3Entry`.
+   */
+  private async s3Source(
+    bucket: string | undefined,
+    p: string,
+  ): Promise<{ file: { size: number; storageClass?: string } } | { dir: { mtime?: Date } } | undefined> {
+    const key = this.normalizeKey(p);
+    if (key) {
+      const first = await this.listFirst(bucket, key);
+      if (first?.Key === key) {
+        return { file: { size: first.Size ?? 0, storageClass: first.StorageClass } };
+      }
     }
-    return undefined;
+    const entry = await this.s3Entry(bucket, p);
+    if (entry && 'file' in entry) {
+      return { file: { size: entry.file.ContentLength ?? 0, storageClass: entry.file.StorageClass } };
+    }
+    return entry;
   }
 
   private buildStats(isDirectory: boolean, size: number, mtime: Date, extra?: Partial<StorageStats>): StorageStats {
@@ -814,13 +849,10 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     if ('dir' in entry) {
       if (!options?.recursive) {
         // What Node throws for fs.rm on a directory
-        const error: NodeJS.ErrnoException = new Error(
-          `Path is a directory: rm returned EISDIR (is a directory) ${filePath}`,
+        const error: StorageError = Object.assign(
+          new Error(`Path is a directory: rm returned EISDIR (is a directory) ${filePath}`),
+          { code: 'ERR_FS_EISDIR', errno: 21, syscall: 'rm', path: filePath },
         );
-        error.code = 'ERR_FS_EISDIR';
-        error.errno = 21;
-        error.syscall = 'rm';
-        error.path = filePath;
         throw error;
       }
       return this.deleteTree(bucket, this.normalizeDirKey(filePath));
@@ -836,7 +868,9 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
     bucket = this.s3Bucket(bucket);
 
-    const entry = await this.s3Entry(bucket, src);
+    // The two lookups run in parallel. Their results are used in the order fs would report the errors.
+    const destIsFolder = this.isFolder(bucket, dest);
+    const entry = await this.s3Source(bucket, src);
     if (!entry) {
       throw this.fsError('ENOENT', 'copyfile', src, dest);
     }
@@ -854,8 +888,7 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       return;
     }
 
-    const target = await this.s3Entry(bucket, dest);
-    if (target && 'dir' in target) {
+    if (await destIsFolder) {
       throw this.fsError('EISDIR', 'copyfile', src, dest);
     }
 
@@ -866,7 +899,10 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     }
 
     try {
-      await this.copyObject(srcKey, destKey, entry.file.ContentLength ?? 0, bucket, { exclusive });
+      await this.copyObject(srcKey, destKey, entry.file.size, bucket, {
+        exclusive,
+        storageClass: entry.file.storageClass,
+      });
     } catch (e: any) {
       if (e?.$metadata?.httpStatusCode === 412) {
         throw this.fsError('EEXIST', 'copyfile', src, dest);
@@ -884,7 +920,9 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
 
     bucket = this.s3Bucket(bucket);
 
-    const entry = await this.s3Entry(bucket, oldPath);
+    // The two lookups run in parallel. Their results are used in the order fs would report the errors.
+    const destIsFolder = this.isFolder(bucket, newPath);
+    const entry = await this.s3Source(bucket, oldPath);
     if (!entry) {
       throw this.fsError('ENOENT', 'rename', oldPath, newPath);
     }
@@ -896,12 +934,11 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      const target = await this.s3Entry(bucket, newPath);
-      if (target && 'dir' in target) {
+      if (await destIsFolder) {
         throw this.fsError('EISDIR', 'rename', oldPath, newPath);
       }
 
-      await this.copyObject(srcKey, destKey, entry.file.ContentLength ?? 0, bucket);
+      await this.copyObject(srcKey, destKey, entry.file.size, bucket, { storageClass: entry.file.storageClass });
       await this.s3Client!.send(new DeleteObjectCommand({ Bucket: bucket, Key: srcKey }));
       return;
     }
@@ -925,44 +962,90 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       }
     }
 
-    // Copy everything first, delete the originals only once every copy has succeeded
+    // Copy everything first, delete the originals only once every copy has succeeded. If a copy fails, the
+    // destination keys written by this call are removed again. An existing (empty) destination folder keeps its
+    // marker: it is not ours, and the copy of the source marker would only have rewritten it.
     const copied: string[] = [];
-    for await (const output of this.listObjects({ Bucket: bucket, Prefix: srcDir })) {
-      const objects = (output.Contents ?? []).flatMap((content) =>
-        content.Key ? [{ key: content.Key, size: content.Size ?? 0 }] : [],
-      );
+    const written: string[] = [];
+    try {
+      for await (const output of this.listObjects({ Bucket: bucket, Prefix: srcDir })) {
+        const objects = (output.Contents ?? []).flatMap((content) =>
+          content.Key ? [{ key: content.Key, size: content.Size ?? 0, storageClass: content.StorageClass }] : [],
+        );
 
-      let next = 0;
-      let failed = false;
-      const worker = async () => {
-        while (!failed && next < objects.length) {
-          const { key, size } = objects[next++];
-          try {
-            await this.copyObject(key, destDir + key.slice(srcDir.length), size, bucket);
-          } catch (e) {
-            failed = true;
-            throw e;
+        let next = 0;
+        let failed = false;
+        const worker = async () => {
+          while (!failed && next < objects.length) {
+            const { key, size, storageClass } = objects[next++];
+            const destKey = destDir + key.slice(srcDir.length);
+            // Recorded before the request: a copy that looks failed on the client may still have landed
+            if (!(target && destKey === destDir)) {
+              written.push(destKey);
+            }
+            try {
+              await this.copyObject(key, destKey, size, bucket, { storageClass });
+            } catch (e) {
+              failed = true;
+              throw e;
+            }
+            copied.push(key);
           }
-          copied.push(key);
+        };
+        // Wait for every worker, so that no copy is still in flight when the rollback runs
+        const results = await Promise.allSettled(
+          Array.from({ length: Math.min(this.copyConcurrency, objects.length) }, worker),
+        );
+        const rejected = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
+        if (rejected) {
+          throw rejected.reason;
         }
-      };
-      await Promise.all(Array.from({ length: Math.min(this.copyConcurrency, objects.length) }, worker));
+      }
+    } catch (error) {
+      try {
+        await this.deleteKeys(bucket, written, true);
+      } catch (cleanupError) {
+        // Keep the original error, but do not lose the failed cleanup
+        if (typeof error === 'object' && error !== null) {
+          (error as StorageError).cleanupError = cleanupError;
+        }
+      }
+      throw error;
     }
 
-    for (let i = 0; i < copied.length; i += 1000) {
-      const result = await this.s3Client!.send(
-        new DeleteObjectsCommand({
-          Bucket: bucket,
-          Delete: { Objects: copied.slice(i, i + 1000).map((key) => ({ Key: key })), Quiet: true },
-        }),
-      );
+    // Not atomic: a failure here leaves the folder at both places, and nothing is rolled back
+    await this.deleteKeys(bucket, copied);
+  }
 
-      if (result.Errors?.length) {
-        const [error] = result.Errors;
-        throw new Error(
-          `Failed to delete ${result.Errors.length} object(s), e.g. "${error.Key}": ${error.Code} ${error.Message}`,
+  /**
+   * Deletes exactly these keys in DeleteObjects batches of 1000 and throws on the first failure. With `bestEffort`,
+   * the remaining batches are still attempted before the first failure is thrown.
+   */
+  private async deleteKeys(bucket: string, keys: string[], bestEffort = false): Promise<void> {
+    let failure: { error: unknown } | undefined;
+    for (let i = 0; i < keys.length; i += 1000) {
+      try {
+        const result = await this.s3Client!.send(
+          new DeleteObjectsCommand({
+            Bucket: bucket,
+            Delete: { Objects: keys.slice(i, i + 1000).map((key) => ({ Key: key })), Quiet: true },
+          }),
         );
+        if (result.Errors?.length) {
+          const [error] = result.Errors;
+          throw new Error(
+            `Failed to delete ${result.Errors.length} object(s), e.g. "${error.Key}": ${error.Code} ${error.Message}`,
+          );
+        }
+      } catch (e) {
+        if (!bestEffort) {
+          throw e;
+        }
+        failure ??= { error: e };
       }
+    }
+    if (failure) {
+      throw failure.error;
     }
   }
 
@@ -971,19 +1054,32 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
     destKey: string,
     size: number,
     bucket: string | undefined,
-    opts?: { exclusive?: boolean },
+    opts?: { exclusive?: boolean; storageClass?: string },
   ): Promise<void> {
     const CopySource = `${bucket}/${srcKey.split('/').map(encodeURIComponent).join('/')}`;
     // Fails with 412 when the destination exists. Without IfNoneMatch this check would not be atomic.
     const IfNoneMatch = opts?.exclusive ? '*' : undefined;
 
+    // Without it the copy would be written as STANDARD. Fails with InvalidObjectState for GLACIER / DEEP_ARCHIVE.
+    const keepClass = (storageClass?: string) =>
+      storageClass && storageClass !== 'STANDARD' ? storageClass : undefined;
+
     if (size <= this.copyThreshold) {
-      // ContentType and metadata are copied by default
-      await this.s3Client!.send(new CopyObjectCommand({ Bucket: bucket, Key: destKey, CopySource, IfNoneMatch }));
+      // ContentType, metadata and tags are copied by default
+      await this.s3Client!.send(
+        new CopyObjectCommand({
+          Bucket: bucket,
+          Key: destKey,
+          CopySource,
+          IfNoneMatch,
+          StorageClass: keepClass(opts?.storageClass) as StorageClass | undefined,
+        }),
+      );
       return;
     }
 
     const head = await this.s3Client!.send(new HeadObjectCommand({ Bucket: bucket, Key: srcKey }));
+    const Tagging = await this.getTagging(bucket, srcKey);
     const { UploadId } = await this.s3Client!.send(
       new CreateMultipartUploadCommand({
         Bucket: bucket,
@@ -993,6 +1089,9 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
         CacheControl: head.CacheControl,
         ContentEncoding: head.ContentEncoding,
         Metadata: head.Metadata,
+        // HEAD only reports the class of non-STANDARD objects
+        StorageClass: keepClass(opts?.storageClass ?? head.StorageClass) as ObjectStorageClass | undefined,
+        Tagging,
       }),
     );
 
@@ -1028,6 +1127,30 @@ export class StorageService implements OnModuleInit, OnModuleDestroy {
       await this.s3Client!.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: destKey, UploadId })).catch(
         () => undefined,
       );
+      throw e;
+    }
+  }
+
+  /**
+   * The tags of an object as a URL-encoded query string, for CreateMultipartUpload (UploadPartCopy cannot copy them).
+   * Without `s3:GetObjectTagging`, or on a provider without tagging, the copy goes on without tags.
+   */
+  private async getTagging(bucket: string | undefined, key: string): Promise<string | undefined> {
+    try {
+      const { TagSet } = await this.s3Client!.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: key }));
+      return (
+        TagSet?.map(({ Key, Value }) => `${encodeURIComponent(Key ?? '')}=${encodeURIComponent(Value ?? '')}`).join(
+          '&',
+        ) || undefined
+      );
+    } catch (e: any) {
+      const status = e?.$metadata?.httpStatusCode;
+      if (['AccessDenied', 'NotImplemented', 'MethodNotAllowed', 'UnsupportedOperation'].includes(e?.name)) {
+        return undefined;
+      }
+      if (status === 403 || status === 405 || status === 501) {
+        return undefined;
+      }
       throw e;
     }
   }

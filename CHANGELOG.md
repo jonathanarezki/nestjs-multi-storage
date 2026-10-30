@@ -4,6 +4,25 @@ All notable changes to this project are documented in this file. The format is b
 
 Releases before 0.5.0 are listed on the [GitHub releases page](https://github.com/jonathanarezki/nestjs-multi-storage/releases).
 
+## [0.5.1] - 2026-10-30
+
+### Added
+
+- `StorageError` (an `Error` with `code`, `errno?`, `syscall?`, `path?`, `dest?`, `cleanupError?`), the `StorageErrorCode` union of the emulated codes and the structural type guard `isStorageError(error, code?)`. It also recognizes the errors of the filesystem and memory backends, and is `false` for AWS SDK errors. See the new "Error handling" README section.
+
+### Changed
+
+- When `endpoint` is set, `requestChecksumCalculation` and `responseChecksumValidation` now default to `'WHEN_REQUIRED'` (each independently), so S3-compatible providers work without setting them. Explicit values still win; set `'WHEN_SUPPORTED'` to opt back in to the SDK defaults. Without `endpoint` the SDK defaults are unchanged.
+- S3 `rename` / `copyFile` and the folder lookups behind `stat`, `exists`, `rm`, `rmdir`, `readdir` and `mkdir` need fewer requests, and `rename` / `copyFile` run their source and destination lookups in parallel: a file `rename` takes 4 requests in 3 round trips (was 6, or 4 over an existing file), `copyFile` 3 requests in 2 round trips, and `stat` of a folder or a missing path 2 requests (was 2 to 3). A folder `rename` costs `n + 2 * ceil(n / 1000) + 6` requests. Error codes and their precedence are unchanged.
+- README: documented the request cost of an S3 `rename`, that it is not atomic, and that the destination's parent folder must exist on the filesystem and memory backends.
+- Releases are now tested on Node 22 and 24 before publishing.
+
+### Fixed
+
+- S3 `rename` and `copyFile` now keep the object's storage class (e.g. `STANDARD_IA`) instead of resetting it to `STANDARD`. Objects in `GLACIER` / `DEEP_ARCHIVE` still need a restore first: S3's `InvalidObjectState` is thrown.
+- S3 copies of objects over 5 GiB (multipart) now keep the object's tags (needs `s3:GetObjectTagging`; without it the copy continues without tags).
+- A failed S3 folder `rename` no longer leaves copies behind: if a copy fails, the destination keys written by that call are deleted again (a pre-existing empty destination folder is kept), the source is untouched, so a retry no longer fails with `ENOTEMPTY`. The original error is rethrown; a failing cleanup is attached as `error.cleanupError`.
+
 ## [0.5.0] - 2026-10-30
 
 ### Upgrading from 0.4.x

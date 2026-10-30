@@ -5,7 +5,7 @@ export interface StorageModuleOptions {
   endpointCDN?: string;
   region?: string;
   forcePathStyle?: boolean;
-  /** Set to 'WHEN_REQUIRED' for S3-compatible providers that reject the SDK's default checksums */
+  /** Defaults to 'WHEN_REQUIRED' when `endpoint` is set (S3-compatible providers often reject the SDK default checksums); explicit values win */
   requestChecksumCalculation?: 'WHEN_SUPPORTED' | 'WHEN_REQUIRED';
   responseChecksumValidation?: 'WHEN_SUPPORTED' | 'WHEN_REQUIRED';
   bucket?: string;

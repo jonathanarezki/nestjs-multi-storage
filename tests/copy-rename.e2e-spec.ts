@@ -2,11 +2,13 @@ import * as fs from 'fs';
 import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import { randomBytes } from 'crypto';
 import {
+  Ctx,
   createCtx,
   describeBackends,
   describeS3,
   expectFsError,
   S3_BACKEND,
+  rawKeys,
   S3_BUCKET,
   useCtx,
 } from './support/harness';
@@ -306,5 +308,191 @@ describeS3('multipart copy (S3)', () => {
     } finally {
       await ctx.close();
     }
+  });
+});
+
+describeS3('failed folder rename rolls back (S3)', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await createCtx(S3_BACKEND, 'rollback');
+  });
+  afterEach(async () => {
+    await ctx.close();
+  });
+
+  const files = Array.from({ length: 12 }, (_, i) => `src/f${String(i).padStart(2, '0')}.txt`);
+  const keys = (names: string[]) => names.map((n) => `${ctx.prefix}/${n}`);
+
+  /** Fails the Nth CopyObject (1-based) and, when `failDeletes`, every DeleteObjects; `remove()` lifts the fault. */
+  function injectFault(nth: number, failDeletes = false) {
+    let copies = 0;
+    ctx.service.s3client!.middlewareStack.add(
+      (next, context) => async (args) => {
+        if (context.commandName === 'CopyObjectCommand' && ++copies === nth) {
+          throw Object.assign(new Error('injected copy failure'), { code: 'EINJECTED' });
+        }
+        if (failDeletes && context.commandName === 'DeleteObjectsCommand') {
+          throw new Error('injected delete failure');
+        }
+        return next(args);
+      },
+      { step: 'initialize', name: 'fault' },
+    );
+    return () => ctx.service.s3client!.middlewareStack.remove('fault');
+  }
+
+  const seed = async (withMarker = false) => {
+    if (withMarker) await ctx.service.mkdir('src');
+    for (const f of files) await ctx.service.writeFile(f, f);
+  };
+
+  it('leaves the destination empty and the source intact, rethrows the original error, retry succeeds', async () => {
+    const { service } = ctx;
+    await seed(true);
+    const before = await rawKeys(service, `${ctx.prefix}/`);
+    const remove = injectFault(6);
+
+    const error: any = await service.rename('src', 'dst').then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(error?.message).toBe('injected copy failure');
+    expect(error.code).toBe('EINJECTED');
+    expect(error.cleanupError).toBeUndefined();
+
+    expect(await rawKeys(service, `${ctx.prefix}/`)).toEqual(before);
+    expect(await rawKeys(service, `${ctx.prefix}/dst`)).toEqual([]);
+    expect(await service.exists('dst')).toBe(false);
+    expect((await service.readdir('src')).length).toBe(files.length);
+
+    remove();
+    await service.rename('src', 'dst');
+    expect(await service.exists('src')).toBe(false);
+    expect((await service.readdir('dst')).length).toBe(files.length);
+    expect(await read({ ctx }, 'dst/f03.txt')).toBe('src/f03.txt');
+  });
+
+  it('keeps a pre-existing empty destination folder (its marker) and nothing else', async () => {
+    const { service } = ctx;
+    await seed(true);
+    await service.mkdir('dst');
+    const before = await rawKeys(service, `${ctx.prefix}/`);
+    expect(before).toContain(`${ctx.prefix}/dst/`);
+    const remove = injectFault(4);
+
+    await expect(service.rename('src', 'dst')).rejects.toThrow('injected copy failure');
+    expect(await rawKeys(service, `${ctx.prefix}/`)).toEqual(before);
+    expect(await service.readdir('dst')).toEqual([]);
+
+    remove();
+    await service.rename('src', 'dst');
+    expect((await service.readdir('dst')).length).toBe(files.length);
+    expect(await service.exists('src')).toBe(false);
+  });
+
+  it('never deletes keys it did not write: unrelated objects next to the destination survive', async () => {
+    const { service } = ctx;
+    await seed();
+    await service.writeFile('dst2/keep.txt', 'keep');
+    await service.writeFile('dst-sibling.txt', 'keep');
+    const remove = injectFault(3);
+
+    await expect(service.rename('src', 'dst')).rejects.toThrow('injected copy failure');
+    expect(await rawKeys(service, `${ctx.prefix}/dst`)).toEqual(keys(['dst-sibling.txt', 'dst2/keep.txt']));
+    remove();
+  });
+
+  it('a failing cleanup still rethrows the original error and attaches cleanupError', async () => {
+    const { service } = ctx;
+    await seed();
+    injectFault(6, true);
+
+    const error: any = await service.rename('src', 'dst').then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(error?.message).toBe('injected copy failure');
+    expect(error.cleanupError).toBeInstanceOf(Error);
+    expect(error.cleanupError.message).toBe('injected delete failure');
+    // The source is untouched either way
+    expect((await service.readdir('src')).length).toBe(files.length);
+  });
+
+  it('rolls back in batches of up to 1000 keys', async () => {
+    const { service } = ctx;
+    const many = Array.from({ length: 1100 }, (_, i) => `big/f${String(i).padStart(4, '0')}.txt`);
+    for (let i = 0; i < many.length; i += 100) {
+      await Promise.all(many.slice(i, i + 100).map((f) => service.writeFile(f, 'x')));
+    }
+    const batches: number[] = [];
+    service.s3client!.middlewareStack.add(
+      (next, context) => async (args) => {
+        if (context.commandName === 'DeleteObjectsCommand') batches.push((args.input as any).Delete.Objects.length);
+        return next(args);
+      },
+      { step: 'initialize', name: 'batches' },
+    );
+    injectFault(1100);
+
+    await expect(service.rename('big', 'big2')).rejects.toThrow('injected copy failure');
+    expect(batches).toEqual([1000, 100]);
+    expect(await rawKeys(service, `${ctx.prefix}/big2`)).toEqual([]);
+    expect((await service.readdir('big')).length).toBe(1100);
+  }, 120_000);
+
+  it('single file: a failed copy changes nothing', async () => {
+    const { service } = ctx;
+    await service.writeFile('one.txt', 'one');
+    const remove = injectFault(1);
+    await expect(service.rename('one.txt', 'two.txt')).rejects.toThrow('injected copy failure');
+    expect(await rawKeys(service, `${ctx.prefix}/`)).toEqual(keys(['one.txt']));
+    remove();
+    await service.rename('one.txt', 'two.txt');
+    expect(await rawKeys(service, `${ctx.prefix}/`)).toEqual(keys(['two.txt']));
+  });
+});
+
+describeS3('rename request count (S3), as documented in the README', () => {
+  let ctx: Ctx;
+  beforeEach(async () => {
+    ctx = await createCtx(S3_BACKEND, 'rename-count');
+  });
+  afterEach(async () => {
+    await ctx.close();
+  });
+
+  const count = async (action: () => Promise<unknown>) => {
+    const commands: string[] = [];
+    ctx.service.s3client!.middlewareStack.add(
+      (next, context) => async (args) => {
+        commands.push(context.commandName!);
+        return next(args);
+      },
+      { step: 'initialize', name: 'count' },
+    );
+    await action();
+    ctx.service.s3client!.middlewareStack.remove('count');
+    return commands;
+  };
+
+  it('file: 4 requests, to a new name and over an existing file', async () => {
+    const { service } = ctx;
+    await service.writeFile('a.txt', 'a');
+    const expected = ['ListObjectsV2Command', 'ListObjectsV2Command', 'CopyObjectCommand', 'DeleteObjectCommand'];
+    expect(await count(() => service.rename('a.txt', 'b.txt'))).toEqual(expected);
+    await service.writeFile('c.txt', 'c');
+    expect(await count(() => service.rename('c.txt', 'b.txt'))).toEqual(expected);
+  });
+
+  it('folder with n objects: n + 2 * ceil(n / 1000) + 6, with or without a marker', async () => {
+    const { service } = ctx;
+    await service.mkdir('m');
+    for (let i = 0; i < 12; i++) await service.writeFile(`m/${i}.txt`, 'x');
+    // n = 13 objects (12 files and the marker)
+    expect(await count(() => service.rename('m', 'm2'))).toHaveLength(13 + 2 + 6);
+
+    for (let i = 0; i < 12; i++) await service.writeFile(`i/${i}.txt`, 'x');
+    // implicit folder (no marker): n = 12
+    expect(await count(() => service.rename('i', 'i2'))).toHaveLength(12 + 2 + 6);
   });
 });

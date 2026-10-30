@@ -13,12 +13,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Test, publish to npm and create GitHub release
+  meta:
+    name: Determine version and what is left to do
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      id-token: write # npm trusted publishing (OIDC)
+      contents: read
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+      publish: ${{ steps.meta.outputs.publish }}
+      release: ${{ steps.meta.outputs.release }}
 
     steps:
       - name: Checkout code
@@ -52,45 +56,83 @@ jobs:
             echo "release=true" >> "$GITHUB_OUTPUT"
           fi
 
+  test:
+    name: Test on Node ${{ matrix.node }}
+    needs: meta
+    if: needs.meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js ${{ matrix.node }}
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        # Without --fix, so formatting problems fail the build instead of being fixed silently
+        run: npx eslint 'lib/**/*.ts'
+
+      - name: Check formatting
+        run: npx prettier --check 'lib/**/*.ts' 'tests/**/*.ts'
+
+      - name: Build
+        run: npm run build
+
+      - name: Test (e2e, starts adobe/s3mock via Docker)
+        env:
+          REQUIRE_S3_TESTS: '1' # fail instead of skipping the S3 suites when s3mock cannot start
+        run: npm run test:e2e
+
+  release:
+    name: Publish to npm and create GitHub release
+    needs: [meta, test]
+    # test is skipped when the version is already on npm; a failed or cancelled test blocks the release
+    if: always() && needs.meta.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write # npm trusted publishing (OIDC)
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
       - name: Setup Node.js
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.publish == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Upgrade npm to the 11.x line (trusted publishing needs >= 11.5.1)
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.publish == 'true'
         run: npm install -g npm@11
 
       - name: Install dependencies
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.publish == 'true'
         run: npm ci
 
-      - name: Lint
-        if: steps.meta.outputs.publish == 'true'
-        # Without --fix, so formatting problems fail the build instead of being fixed silently
-        run: npx eslint 'lib/**/*.ts'
-
-      - name: Check formatting
-        if: steps.meta.outputs.publish == 'true'
-        run: npx prettier --check 'lib/**/*.ts' 'tests/**/*.ts'
-
       - name: Build
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.publish == 'true'
         run: npm run build
 
-      - name: Test (e2e, starts adobe/s3mock via Docker)
-        if: steps.meta.outputs.publish == 'true'
-        env:
-          REQUIRE_S3_TESTS: '1' # fail instead of skipping the S3 suites when s3mock cannot start
-        run: npm run test:e2e
-
       - name: Publish to npm
-        if: steps.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.publish == 'true'
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
-          PRERELEASE: ${{ steps.meta.outputs.prerelease }}
+          VERSION: ${{ needs.meta.outputs.version }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
         run: |
           if [ "$PRERELEASE" = "true" ]; then
             npm publish --access public --tag next
@@ -100,9 +142,9 @@ jobs:
 
       - name: Extract release notes from CHANGELOG.md
         id: notes
-        if: steps.meta.outputs.release == 'true'
+        if: needs.meta.outputs.release == 'true'
         env:
-          VERSION: ${{ steps.meta.outputs.version }}
+          VERSION: ${{ needs.meta.outputs.version }}
         run: |
           awk -v header="## [$VERSION]" '
             index($0, header) == 1 { found = 1; next }
@@ -118,15 +160,15 @@ jobs:
           fi
 
       - name: Create GitHub release
-        if: steps.meta.outputs.release == 'true'
+        if: needs.meta.outputs.release == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.meta.outputs.version }}
+          tag_name: v${{ needs.meta.outputs.version }}
           target_commitish: ${{ github.sha }}
-          name: Release v${{ steps.meta.outputs.version }}
+          name: Release v${{ needs.meta.outputs.version }}
           body_path: ${{ steps.notes.outputs.found == 'true' && steps.notes.outputs.path || '' }}
           draft: false
-          prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
+          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
           generate_release_notes: ${{ steps.notes.outputs.found != 'true' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

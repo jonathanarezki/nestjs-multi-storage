@@ -157,8 +157,8 @@ export class AvatarService {
 | `accessKeyId`                | `string`                              | S3         | Access key. Credentials are used only when both `accessKeyId` and `secretAccessKey` are set; otherwise the AWS default credential chain is used (environment variables, IAM roles, `~/.aws`).                                                                                                                    |
 | `secretAccessKey`            | `string`                              | S3         | Secret key. See `accessKeyId`.                                                                                                                                                                                                                                                                                   |
 | `endpointCDN`                | `string`                              | S3         | CDN host that replaces `endpoint` in URLs. Used by `readFile` (which then downloads via the CDN) and by `getSignedUrl` / `getSignedPutUrl`. Only takes effect when `endpoint` is set as well; otherwise `readFile` reads directly from S3.                                                                       |
-| `requestChecksumCalculation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'` | S3         | Passed to the S3 client. Set to `'WHEN_REQUIRED'` for providers that reject the SDK's default CRC32 checksums. Default: the SDK default.                                                                                                                                                                         |
-| `responseChecksumValidation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'` | S3         | Passed to the S3 client. Same purpose as above.                                                                                                                                                                                                                                                                  |
+| `requestChecksumCalculation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'` | S3         | Passed to the S3 client. Default: `'WHEN_REQUIRED'` when `endpoint` is set (S3-compatible providers often reject the SDK's default CRC32 checksums), otherwise the SDK default. An explicit value always wins; set `'WHEN_SUPPORTED'` to opt back in to the SDK default on a custom endpoint.                    |
+| `responseChecksumValidation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'` | S3         | Passed to the S3 client. Same defaults and purpose as above; the two options are defaulted independently.                                                                                                                                                                                                        |
 
 The S3 client is created in `onModuleInit` and destroyed in `onModuleDestroy`. With no `bucket` (and none passed per call), S3 calls throw `No bucket configured: pass a bucket or set the bucket option`.
 
@@ -259,7 +259,7 @@ await storage.rename('inbox/a.txt', 'archive/a.txt'); // file
 await storage.rename('inbox', 'archive/inbox'); // folder, including its contents
 ```
 
-The same call moves a file between folders. Semantics follow `fs.rename`: a file overwrites an existing file; renaming onto an existing folder throws `EISDIR`; a folder onto a file throws `ENOTDIR`; a folder onto a non-empty folder throws `ENOTEMPTY`; a folder into itself throws `EINVAL`. See [the notes below](#how-s3-differs-from-a-real-filesystem) for cost and atomicity.
+The same call moves a file between folders. Semantics follow `fs.rename`: a file overwrites an existing file; renaming onto an existing folder throws `EISDIR`; a folder onto a file throws `ENOTDIR`; a folder onto a non-empty folder throws `ENOTEMPTY`; a folder into itself throws `EINVAL`. On the filesystem and memory backends the destination's parent folder must exist (as with `fs.rename`, otherwise `ENOENT`), while on S3 it does not have to. See [the notes below](#how-s3-differs-from-a-real-filesystem) for cost and atomicity.
 
 ### Streams
 
@@ -339,7 +339,13 @@ Copies and renames stay within one bucket.
 
 - **Keys never start with `/`.** Leading slashes are stripped from every path, so `'/uploads/x.png'` is the key `uploads/x.png`, and `'/'` is the root, not a folder of its own. Objects that were stored under a key starting with `/` (written by an older version without a `prefix`) are not reachable until renamed, see [Upgrading from 0.4.x](CHANGELOG.md#upgrading-from-04x).
 - **Folders are implicit.** S3 has only objects. A folder exists if a `folder/` marker object or any key with that prefix exists. `mkdir` writes the marker. Writing `a/b/c.txt` does not require `a/b` to exist (the equivalent `fs` call would fail with `ENOENT`), and does not create markers for `a` or `b`. `readdir`, `stat` and `exists` still see those folders. A folder that only exists through its objects disappears with its last object.
-- **`rename` is copy plus delete.** It is not atomic, it costs as much as the data size, and a failure can leave copies behind. A folder rename copies every object (8 at a time) and deletes the originals only after all copies succeeded. Objects over 5 GiB are copied with multipart copy.
+- **`rename` is copy plus delete, and not atomic.** It costs as much as the data size. Objects over 5 GiB are copied with multipart copy, and a folder rename copies 8 objects at a time. What happens on failure:
+  - Folder, a copy fails: the destination keys this call wrote are removed again (best effort, `DeleteObjects` in batches of 1000), the source is untouched and the original error is rethrown. A pre-existing empty destination folder keeps its marker. If that cleanup fails too, the original error is still thrown, with the cleanup failure attached as `error.cleanupError`.
+  - Folder, the delete of the originals fails (after all copies succeeded): this cannot be rolled back. The folder then exists at both places and the error is thrown; delete the leftovers or retry the delete yourself.
+  - Single file: a failed copy changes nothing. If the delete of the source fails after a successful copy, the file exists at both places.
+  - Requests: a single file costs 4 requests in 3 round trips, whether or not the destination exists: 2 `LIST`s that run in parallel (the source, which also yields its size and storage class, and the destination, to detect a folder there), 1 `CopyObject` and 1 `DeleteObject`. `copyFile` costs 3 requests in 2 round trips (`COPYFILE_EXCL` adds 1 `HEAD`). A file over 5 GiB replaces the `CopyObject` with `HEAD`, `GetObjectTagging`, `CreateMultipartUpload`, one `UploadPartCopy` per part and `CompleteMultipartUpload`. A folder with `n` objects (the folder marker counts as one) costs `n + 2 * ceil(n / 1000) + 6` requests, with or without a marker: 6 lookups (the 2 parallel `LIST`s, then `HEAD` and `LIST` for the source folder and for the destination), `ceil(n / 1000)` `LIST` pages, `n` `CopyObject` and `ceil(n / 1000)` `DeleteObjects`. `stat` and `exists` cost 1 `HEAD` for a file and 2 requests (`HEAD` and 1 `LIST`) for a folder or a missing path.
+- **Copies keep the storage class.** `rename` and `copyFile` write the destination with the source's storage class (e.g. `STANDARD_IA`, `GLACIER_IR`) instead of resetting it to `STANDARD`. Objects in `GLACIER` or `DEEP_ARCHIVE` cannot be copied until they are restored: S3's `InvalidObjectState` error is thrown unchanged.
+- **Tags** are kept by `CopyObject`. For copies over 5 GiB (multipart) they are read with `GetObjectTagging` and set on the new upload, which needs the `s3:GetObjectTagging` permission; without it (or on a provider without tagging) the copy still succeeds, but without tags.
 - **`COPYFILE_EXCL`** checks the destination first and also sends `If-None-Match: *`, which makes it race-safe on providers that honor it (AWS does; some compatible servers ignore it, hence the pre-check).
 - **Emulated error codes:** `ENOENT`, `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL` and `ERR_FS_EISDIR` (`rm` on a folder without `recursive`), with `code`, `errno`, `syscall` and `path` (and `dest` for two-path calls) set, using the same `code` and `syscall` Node reports (`open` for `readFile` / `createReadStream`, `lstat` for `rm` and recursive `rmdir`, `scandir` for `readdir`, `rmdir`, `mkdir`, ...). Errors that have no `fs` equivalent (permissions, network, a nonexistent bucket) surface as the S3 SDK's errors.
 - **Deliberate deviations from `fs`:**
@@ -350,7 +356,7 @@ Copies and renames stay within one bucket.
   - `readdir` output is sorted on S3 (and de-duplicated); the filesystem order is whatever `fs` returns.
   - `readdir` does not support `withFileTypes`; `readFile` / `writeFile` ignore `flag`, `mode` is ignored on S3, and `mkdir` resolves to `undefined` on S3.
 - **No real metadata.** Ownership, permissions and timestamps other than `mtime` are synthesized (see [stat](#stat-and-storagestats)).
-- **S3-compatible providers** (MinIO, Cloudflare R2, Hetzner, ...) may reject the AWS SDK's default checksums, which breaks multipart uploads. Use `requestChecksumCalculation: 'WHEN_REQUIRED'` and `responseChecksumValidation: 'WHEN_REQUIRED'`, and usually `forcePathStyle: true`:
+- **S3-compatible providers** (MinIO, Cloudflare R2, Hetzner, ...) may reject the AWS SDK's default checksums, which breaks multipart uploads. When `endpoint` is set, `requestChecksumCalculation` and `responseChecksumValidation` therefore default to `'WHEN_REQUIRED'`, so you do not need to set them (usually `forcePathStyle: true` is still needed). To opt back in to the SDK defaults, set either option to `'WHEN_SUPPORTED'` explicitly; without `endpoint` (plain AWS) the SDK defaults apply anyway:
 
 ```ts
 StorageModule.forRoot({
@@ -361,10 +367,28 @@ StorageModule.forRoot({
   accessKeyId: 'minio',
   secretAccessKey: 'minio-secret',
   forcePathStyle: true,
-  requestChecksumCalculation: 'WHEN_REQUIRED',
-  responseChecksumValidation: 'WHEN_REQUIRED',
 });
 ```
+
+## Error handling
+
+Failures that have a filesystem equivalent are Node-style errors with a string `code` (`E NOENT`, `EEXIST`, ...) on every backend. Use the structural guard `isStorageError` (it works with Node's and memfs's own errors too, and is `false` for AWS SDK errors) instead of `catch (error: any)`:
+
+```ts
+import { isStorageError } from 'nestjs-multi-storage';
+
+try {
+  await storage.readFile('missing.txt');
+} catch (e) {
+  if (isStorageError(e, 'ENOENT')) {
+    console.log(e.path, e.syscall); // typed as StorageError
+  } else {
+    throw e;
+  }
+}
+```
+
+`isStorageError(e)` without a code accepts any error with a string `code`. `StorageErrorCode` lists the codes the library emulates; any string is accepted. `StorageError` also has `cleanupError`, see [`rename`](#how-s3-differs-from-a-real-filesystem).
 
 ## Testing your app with the memory backend
 
@@ -419,7 +443,7 @@ The e2e suite runs against all backends; the memory backend always runs. For S3 
 
 ## Releasing
 
-Bump the version in `package.json`, add a [CHANGELOG.md](CHANGELOG.md) entry and push to `main`. The `auto-release.yml` workflow then lints, builds and tests, publishes to npm via [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token, with provenance) and creates the GitHub release from the changelog section. Prerelease versions such as `0.6.0-beta.1` are published under the `next` tag and marked as prereleases on GitHub.
+Bump the version in `package.json`, add a [CHANGELOG.md](CHANGELOG.md) entry and push to `main`. The `auto-release.yml` workflow then lints, builds and tests on Node 22 and 24, and only if both pass publishes to npm via [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token, with provenance) and creates the GitHub release from the changelog section. Prerelease versions such as `0.6.0-beta.1` are published under the `next` tag and marked as prereleases on GitHub.
 
 One-time setup in the npm package settings (Trusted Publisher, GitHub Actions): organization or user `jonathanarezki`, repository `nestjs-multi-storage`, workflow filename `auto-release.yml`.
 

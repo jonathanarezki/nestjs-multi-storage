@@ -216,3 +216,79 @@ describeS3('buckets and options (S3)', () => {
     }
   });
 });
+
+describeS3('checksum defaults (S3)', () => {
+  const resolved = async (overrides: Parameters<typeof s3Options>[1]) => {
+    const ctx = await createCtx(S3_BACKEND, 'checksums', { overrides });
+    try {
+      const { config } = ctx.service.s3client!;
+      return [await config.requestChecksumCalculation(), await config.responseChecksumValidation()];
+    } finally {
+      await ctx.close();
+    }
+  };
+
+  it('endpoint without options: WHEN_REQUIRED for both', async () => {
+    expect(await resolved({ requestChecksumCalculation: undefined, responseChecksumValidation: undefined })).toEqual([
+      'WHEN_REQUIRED',
+      'WHEN_REQUIRED',
+    ]);
+  });
+
+  it('endpoint with explicit WHEN_SUPPORTED: the explicit value wins', async () => {
+    expect(
+      await resolved({ requestChecksumCalculation: 'WHEN_SUPPORTED', responseChecksumValidation: 'WHEN_SUPPORTED' }),
+    ).toEqual(['WHEN_SUPPORTED', 'WHEN_SUPPORTED']);
+  });
+
+  it('one option set, the other defaulted, independently', async () => {
+    expect(
+      await resolved({ requestChecksumCalculation: 'WHEN_SUPPORTED', responseChecksumValidation: undefined }),
+    ).toEqual(['WHEN_SUPPORTED', 'WHEN_REQUIRED']);
+    expect(
+      await resolved({ requestChecksumCalculation: undefined, responseChecksumValidation: 'WHEN_SUPPORTED' }),
+    ).toEqual(['WHEN_REQUIRED', 'WHEN_SUPPORTED']);
+  });
+
+  it('no endpoint: the SDK defaults apply', async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [
+        StorageModule.forRoot({
+          type: 's3',
+          region: 'us-east-1',
+          bucket: 'b',
+          accessKeyId: 'test',
+          secretAccessKey: 'test',
+        }),
+      ],
+    }).compile();
+    await moduleRef.init();
+    try {
+      const { config } = moduleRef.get(StorageService).s3client!;
+      expect(await config.requestChecksumCalculation()).toBe('WHEN_SUPPORTED');
+      expect(await config.responseChecksumValidation()).toBe('WHEN_SUPPORTED');
+    } finally {
+      await moduleRef.close();
+    }
+  });
+
+  it('multipart upload works without passing requestChecksumCalculation', async () => {
+    const ctx = await createCtx(S3_BACKEND, 'multipart-defaults', {
+      overrides: { requestChecksumCalculation: undefined, responseChecksumValidation: undefined },
+    });
+    try {
+      const { service } = ctx;
+      const data = Buffer.alloc(12 * 1024 * 1024, 7);
+      const ws = service.createWriteStream('big.bin');
+      const finished = new Promise<void>((resolve, reject) => {
+        ws.on('error', reject);
+        ws.on('finish', resolve);
+      });
+      ws.end(data);
+      await finished;
+      expect((await service.readFile('big.bin')).equals(data)).toBe(true);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
