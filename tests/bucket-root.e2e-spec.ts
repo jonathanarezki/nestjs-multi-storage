@@ -1,5 +1,8 @@
 import { CreateBucketCommand, DeleteBucketCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { randomUUID } from 'crypto';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 import { StorageModule, StorageService } from '../lib';
 import {
   collect,
@@ -230,12 +233,29 @@ describeBackends('reading a folder', (backend) => {
     await service.mkdir('empty');
     await service.mkdir('full');
     await service.writeFile('full/a.txt', 'x');
+    // Whether Node attaches `path` to this error depends on the Node version (older 22.x does not), so the
+    // fileSystem backend is compared against what the running Node does on a real directory. The emulated
+    // backends (memory, s3) always carry the path, as current Node does.
+    let expectPath = true;
+    if (backend.name === 'fileSystem') {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'nms-eisdir-'));
+      try {
+        const native: any = await fs.promises.readFile(dir).then(
+          () => undefined,
+          (e) => e,
+        );
+        expect(native).toMatchObject({ code: 'EISDIR', syscall: 'read' });
+        expectPath = native.path !== undefined;
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
     for (const p of ['empty', 'full', 'full/']) {
       await expectFsError(service.readFile(p), {
         code: 'EISDIR',
         errno: -21,
         syscall: 'read',
-        path: errPath(p),
+        ...(expectPath ? { path: errPath(p) } : {}),
       });
     }
     await expectFsError(service.readFile('missing'), { code: 'ENOENT', syscall: 'open' });
