@@ -1,0 +1,129 @@
+# Changelog
+
+All notable changes to this project are documented in this file. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+Releases before 0.5.0 are listed on the [GitHub releases page](https://github.com/jonathanarezki/nestjs-multi-storage/releases).
+
+## [0.5.0] - 2026-10-30
+
+### Upgrading from 0.4.x
+
+- **BREAKING:** Node.js >= 22 is now required (`engines`). The AWS SDK now in use itself requires Node 20+.
+- **BREAKING:** The `prefix` option is now applied to S3 object keys. Previously it only applied to the filesystem and was ignored for S3. If you set `prefix` with `type: 's3'`, you will now read and write under `<prefix>/...`. Move existing objects to the new keys, or remove `prefix`.
+- **BREAKING:** When a `prefix` is set, any path that resolves outside it (e.g. `'../x'`) now throws an `Error`, in both filesystem and S3 mode. Without a `prefix`, behaviour is unchanged.
+- **BREAKING:** Method parameters now mirror `fs.promises` exactly. Where `fs` has an options parameter, `bucket` moved into that options object: `readFile`, `writeFile`, `readdir`, `mkdir`, `rmdir`, `rm`, `stat`, `createReadStream` and `createWriteStream`. `exists`, `rename` and `copyFile` keep a trailing `bucket` parameter, `getSignedUrl` / `getSignedPutUrl` keep `opts.bucket`.
+
+  ```ts
+  // 0.4.x
+  await storage.writeFile('a.txt', 'hi', 'other-bucket', 'text/plain');
+  await storage.readFile('a.txt', 'other-bucket');
+  await storage.readdir('dir', 'other-bucket');
+  await storage.createReadStream('a.txt', { start: 0, end: 9 }, 'other-bucket');
+
+  // 0.5.0
+  await storage.writeFile('a.txt', 'hi', { bucket: 'other-bucket', contentType: 'text/plain' });
+  await storage.readFile('a.txt', { bucket: 'other-bucket' });
+  await storage.readdir('dir', { bucket: 'other-bucket' });
+  await storage.createReadStream('a.txt', { start: 0, end: 9, bucket: 'other-bucket' });
+  ```
+
+- **BREAKING:** The `mimetype` parameter of `writeFile` is now the `contentType` option.
+- **BREAKING:** A plain string in an options position now means what it means in `fs`, an encoding, not a bucket (`readFile(path, 'utf8')` returns a string). `readFile` returns a `string` when an encoding is given, otherwise a `Buffer`.
+- **BREAKING:** S3 now throws Node-style errors (`ENOENT`, `ENOTDIR`, `EEXIST`, `ENOTEMPTY`, `ERR_FS_EISDIR`) where it used to succeed silently or throw SDK errors: `readFile` / `createReadStream` on a missing key (`ENOENT`, was `NoSuchKey`), `rm` / `rmdir` / `readdir` on a missing path (`ENOENT`, was a no-op or `[]`), `rm` on a folder without `recursive` (`ERR_FS_EISDIR`), `readdir` on a file (`ENOTDIR`), `mkdir` on a file (`EEXIST`). `rm` on S3 now also removes folders with `recursive: true`.
+- **BREAKING:** `exists` on S3 now returns `true` for implicit folders and throws on errors other than "not found" (403, network) instead of returning `false`. Calls without a configured or passed bucket throw `No bucket configured: pass a bucket or set the bucket option`.
+- **BREAKING:** Without a `prefix`, S3 keys escaping the bucket root (`'../x'`, also `'/../x'`) now throw.
+- **BREAKING:** On S3, leading slashes are now stripped from every key and folder path (a backslash counts as a slash), so `'/a.txt'`, `'a.txt'` and `'//a.txt'` are the same object, `'/dir/'` and `'dir'` the same folder, and `'/'` is the bucket root (or the prefix root), exactly like `''`. Before, without a `prefix`, the leading slash was part of the key. Objects that were stored that way (written without a `prefix` using paths like `'/uploads/x.png'`, which created the key `/uploads/x.png`) are no longer reachable through the library until they are renamed. Run the following once, before upgrading. It is not needed if a `prefix` was set, or if your keys never started with `/`. The filesystem backend is unchanged.
+
+  ```ts
+  import { CopyObjectCommand, DeleteObjectsCommand, ListObjectsV2Command, S3Client } from '@aws-sdk/client-s3';
+
+  const s3 = new S3Client({
+    /* same endpoint, region and credentials as the module */
+  });
+  const Bucket = 'my-bucket';
+
+  let ContinuationToken: string | undefined;
+  do {
+    // Keys starting with '/' form one contiguous range, so Prefix: '/' lists exactly those
+    const page = await s3.send(new ListObjectsV2Command({ Bucket, Prefix: '/', ContinuationToken }));
+    // A key consisting only of slashes has no target name and is left alone
+    const keys = (page.Contents ?? []).map((object) => object.Key!).filter((key) => key.replace(/^\/+/, ''));
+    for (const key of keys) {
+      const dest = key.replace(/^\/+/, '');
+      await s3.send(
+        new CopyObjectCommand({
+          Bucket,
+          Key: dest,
+          // CopySource is URL-encoded per path segment
+          CopySource: `${Bucket}/${key.split('/').map(encodeURIComponent).join('/')}`,
+        }),
+      );
+    }
+    // Delete the originals of this page only after all its copies succeeded
+    if (keys.length) {
+      await s3.send(
+        new DeleteObjectsCommand({ Bucket, Delete: { Objects: keys.map((Key) => ({ Key })), Quiet: true } }),
+      );
+    }
+    ContinuationToken = page.NextContinuationToken;
+  } while (ContinuationToken);
+  ```
+
+  The copy overwrites an existing object at the target key (e.g. `/a.txt` replaces `a.txt`), so check for such pairs first if both exist. `CopyObject` handles objects up to 5 GiB; larger ones need a multipart copy.
+
+- The S3 `prefix` is normalized: leading and trailing `/` or `\` are stripped, so `'/media/'` and `'media'` are equivalent.
+- For S3, `storage.s3client` is now always defined. Credentials are optional: when `accessKeyId`/`secretAccessKey` are omitted, the AWS default credential chain is used (env vars, IAM roles, shared config). Missing region or endpoint configuration now surfaces as an SDK error on the first call instead of a null dereference.
+- The S3 `createWriteStream` return type is now `Writable` (previously inferred as `fs.WriteStream | PassThrough`).
+- If you use an S3-compatible provider such as MinIO, Cloudflare R2 or Hetzner, set `requestChecksumCalculation` and `responseChecksumValidation` to `'WHEN_REQUIRED'` (see below).
+
+### Added
+
+- `type: 'memory'`: an in-memory backend for tests, built on [memfs](https://github.com/streamich/memfs) and running the same code as the filesystem backend. Each `StorageService` instance has its own isolated, empty store (root `/`, or `prefix`). The new `files` option (`Record<string, string | Buffer>`) pre-populates it. `memfs` is an optional peer dependency (`npm i -D memfs`), only loaded when `type: 'memory'` is used.
+- `requestChecksumCalculation` and `responseChecksumValidation` options (`'WHEN_SUPPORTED'` | `'WHEN_REQUIRED'`), passed to the S3 client. Recent AWS SDK versions send CRC32 checksums by default, which some S3-compatible providers reject (e.g. multipart uploads fail).
+
+  ```ts
+  StorageModule.forRoot({
+    type: 's3',
+    // ...bucket, region, endpoint, credentials
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
+  });
+  ```
+
+- Filesystem-like methods, with an optional trailing `bucket` for S3:
+  - `rename(oldPath, newPath)` and `copyFile(src, dest, mode?)` (supports `fs.constants.COPYFILE_EXCL`).
+  - `stat(path)` returning `StorageStats` (an `fs.Stats`-compatible type; S3 additionally sets `contentType` and `etag`).
+  - `readdir(path, { recursive?, encoding?, bucket? })`.
+  - `readFile`, `writeFile`, `readdir`, `mkdir`, `rmdir`, `rm`, `stat`, `createReadStream` and `createWriteStream` take `fs.promises`-style options (`encoding`, `flag`, `mode`, `recursive`, `force`, `start`, `end`, ...) with `bucket` as one of the keys; `writeFile` also takes `contentType`.
+  - `rm(path, { force?, recursive? })` and `rmdir(path, { recursive? })` (`recursive: false` mirrors `fs.rmdir`). `mkdir` and `rmdir` default to `recursive: true`, a deliberate deviation from `fs`.
+  - `writeFile` accepts `Uint8Array` data. The option types are exported (`StorageReadFileOptions`, `StorageWriteFileOptions`, ...).
+  - `createReadStream` supports `encoding` on S3.
+  - On S3, errors mimic Node's (`ENOENT`, `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL`, with `code`, `errno`, `syscall` and `path`). Folders are implicit, so `stat` reports a folder when a `folder/` marker or any object under the prefix exists.
+  - S3 `rename` is a copy followed by a delete: it is not atomic and costs as much as the data size. Objects over 5 GiB are copied with multipart copy.
+
+### Changed
+
+- `StorageService.mkdir` now resolves to `string | undefined` (previously a union including `PutObjectCommandOutput`).
+- The `prefix` option is enforced for all methods, including signed URLs and streams (`createReadStream` and `createWriteStream` throw synchronously on paths outside the prefix).
+- S3 listing now uses ListObjectsV2 instead of ListObjects (v1).
+- Removed the unused `@types/node-fetch` dev dependency.
+- Releases are published to npm automatically from GitHub Actions via trusted publishing, with provenance. The package now ships only `dist`, README, CHANGELOG and LICENSE (`files`).
+- Updated all dependencies to their latest version within the current major (except `@types/node`, now 22.x to match the Node.js requirement). The AWS SDK minimum is now `^3.1160.0`.
+
+### Fixed
+
+- `readFile` via `endpointCDN` crashed because `node-fetch` was used but never declared as a dependency. It now uses Node's built-in `fetch` and throws on non-2xx responses (previously an error body could be returned as the file content).
+- S3 `createWriteStream` emitted `'finish'` before the upload had completed, and emitted it twice. `'finish'` now fires once, after the upload completes. Upload errors are emitted as `'error'`, and destroying the stream aborts the multipart upload.
+- S3 `rmdir` only deleted the first 1000 objects and failed on empty folders. It now paginates, deletes in batches of 1000, and throws if S3 reports per-object deletion errors.
+- S3 `readdir` silently logged errors with `console.log` and returned partial results, and could stop paginating early. Errors are now thrown, pagination uses continuation tokens, and entries are de-duplicated.
+
+- `readFile` only takes the CDN path when both `endpoint` and `endpointCDN` are set (it used to dereference an unset `endpoint`).
+- S3 `exists` reported `false` for implicit folders and swallowed every error from the folder lookup.
+- S3 `copyFile` with `COPYFILE_EXCL` and `src === dest` now throws `EEXIST`, like Node.
+- S3 without a `prefix`: the bucket root (`''`, `'.'`) is now the whole bucket. `readdir('')` (also recursive), `stat('')`, `rm('', { recursive: true })` and `rmdir('')` used to address a key `./` and found nothing; `mkdir('')` is a no-op, and writing the root as a file throws `EISDIR`. A path of `'/'` no longer resolves to an empty object key (it used to be reported as a file, and `readFile('/')` returned the bucket listing).
+- S3 methods now reject with the SDK's `NoSuchBucket` error for a nonexistent bucket instead of looking like a missing file, including for the root, which previously never touched the bucket.
+- S3 `readFile` and `createReadStream` on a folder throw `EISDIR` (syscall `read`) like Node, instead of `ENOENT`.
+
+### Security
+
+- `npm audit` went from 30 vulnerabilities (2 critical, 9 high) to 0, by updating the AWS SDK and dev tooling within their current major versions.

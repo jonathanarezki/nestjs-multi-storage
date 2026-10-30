@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "target": "es2022",
+    "rootDir": "..",
+    "outDir": "../.tests-out",
+    "noEmit": true,
+    "declaration": false,
+    "types": ["jest", "node"]
+  },
+  "include": ["./**/*.ts", "../lib/**/*.ts"],
+  "exclude": ["node_modules"]
+}
