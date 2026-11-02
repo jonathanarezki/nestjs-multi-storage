@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import { GetObjectTaggingCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand } from '@aws-sdk/client-s3';
 import { randomBytes } from 'crypto';
-import { Ctx, createCtx, describeS3, S3_BACKEND, S3_BUCKET } from './support/harness';
+import { Ctx, createCtx, describeS3, S3_BACKEND, S3_BUCKET, s3Internals } from './support/harness';
 
 interface Call {
   name: string;
@@ -198,8 +198,8 @@ describeS3('S3 request counts, parallel lookups and storage class (S3)', () => {
   describe('multipart copy (5 MiB parts)', () => {
     const big = randomBytes(11 * 1024 * 1024);
     beforeEach(() => {
-      (ctx.service as any).copyThreshold = 5 * 1024 * 1024;
-      (ctx.service as any).copyPartSize = 5 * 1024 * 1024;
+      s3Internals(ctx.service).copyThreshold = 5 * 1024 * 1024;
+      s3Internals(ctx.service).copyPartSize = 5 * 1024 * 1024;
     });
 
     it('keeps the storage class and the tags', async () => {

@@ -4,7 +4,7 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { StorageModule, StorageModuleOptions, StorageService } from '../lib';
-import { collect } from './support/harness';
+import { collect, describeMemory } from './support/harness';
 
 async function createModule(options: Partial<StorageModuleOptions> = {}) {
   const moduleRef = await Test.createTestingModule({
@@ -14,7 +14,7 @@ async function createModule(options: Partial<StorageModuleOptions> = {}) {
   return { moduleRef, service: moduleRef.get(StorageService) };
 }
 
-describe('memory backend', () => {
+describeMemory('memory backend', () => {
   it('has no S3 client', async () => {
     const { moduleRef, service } = await createModule();
     expect(service.s3client).toBeUndefined();

@@ -219,7 +219,9 @@ describeS3('nonexistent bucket (S3)', () => {
         await expect(service.readFile('a.txt', MISSING)).rejects.toMatchObject(noSuchBucket);
         await expect(collect(service.createReadStream('a.txt', MISSING))).rejects.toMatchObject(noSuchBucket);
       } finally {
-        await ctx.close();
+        // Not ctx.close(): without a prefix its rmdir('') would empty the SHARED bucket, under other workers' feet.
+        // Nothing was written here, so closing the module is all the cleanup needed.
+        await ctx.moduleRef.close();
       }
     });
   }

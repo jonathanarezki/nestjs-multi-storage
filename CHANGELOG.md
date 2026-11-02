@@ -4,6 +4,28 @@ All notable changes to this project are documented in this file. The format is b
 
 Releases before 0.5.0 are listed on the [GitHub releases page](https://github.com/jonathanarezki/nestjs-multi-storage/releases).
 
+## [0.6.0] - 2026-11-02
+
+This release is non-breaking: existing single-store configurations and code work unchanged.
+
+### Added
+
+- Multiple named disks. `StorageModule.forRoot` / `forRootAsync` accept `{ default: 'uploads', disks: { uploads: {...}, tmp: {...} } }` (`StorageMultiDiskOptions`) next to the existing single-store options, which become one disk named `'default'`. `isGlobal` stays at the top level. Invalid configurations (empty `disks`, unknown `default`, empty disk name, non-object disk) fail at startup, and disk construction errors are prefixed with `Storage disk "name": `.
+- `StorageDisk`: one named store with the complete file API and `s3client` (no `disk()`).
+- `StorageService.disk(name)` and `StorageService.diskNames`. `StorageService` is the default disk; an unknown name throws `Unknown storage disk "x". Configured disks: a, b`.
+- `@InjectStorage('name')` and `getStorageToken('name')` to inject (or look up and override in tests) a `StorageDisk`. `forRoot` registers a token per disk name.
+- `forRootAsync({ disks: ['uploads', 'tmp'] })`: the names to make injectable, as they are only known after the factory has run. Without `disks`, no disk tokens are registered (`StorageService` and `storage.disk(name)` still work).
+- The config types `StorageMultiDiskOptions`, `StorageDiskOptions` and `StorageConfig`.
+- FTP and SFTP backends (`type: 'ftp'` and `type: 'sftp'`). They behave like the filesystem backend: real folders, Node-style errors, recursive `readdir`; signed URLs are not supported. Each needs an optional peer dependency that you install only if you use it: `basic-ftp` for ftp and `ssh2` for sftp (`type 'ftp' requires the optional peer dependency "basic-ftp": npm install basic-ftp` when it is missing). New options: `host`, `port`, `username`, `password`, `timeout` (both), `secure` (FTPS) and `maxConnections` (ftp), `privateKey`, `passphrase` and `hostKey` (sftp); `prefix` is the remote base directory. sftp sends keepalive pings (every 10 s, or a third of `timeout`), so a silently dead connection is dropped and the next operation reconnects.
+- sftp requires `hostKey`, the server's `SHA256:<base64>` fingerprint (as printed by `ssh-keygen -lf`), and fails the connection on a mismatch; `hostKey: false` explicitly disables the verification, which allows man-in-the-middle attacks. See the new "FTP and SFTP" README section.
+- `EACCES` (permission denied, reported by sftp) in `StorageErrorCode`.
+- README: new "Multiple disks" and "FTP and SFTP" sections, and an updated "Testing" section (`E2E_BACKENDS`, FTP and SFTP servers, `test:e2e:fast`).
+
+### Changed
+
+- Internally the filesystem, memory and S3 backends are now separate driver classes behind `StorageService` / `StorageDisk`. There is no behaviour change.
+- `@nestjs/common` is now only a peer dependency (it was also a regular dependency, which could install a second copy of Nest). No action needed: every Nest app already has it.
+
 ## [0.5.1] - 2026-10-30
 
 ### Added

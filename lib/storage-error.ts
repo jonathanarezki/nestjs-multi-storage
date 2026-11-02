@@ -1,6 +1,7 @@
-/** Node's `fs` error codes (with errno and description) that the S3 backend emulates. */
+/** Node's `fs` error codes (with errno and description) that the s3, ftp and sftp drivers emulate. */
 export const FS_ERRORS = {
   ENOENT: [-2, 'no such file or directory'],
+  EACCES: [-13, 'permission denied'],
   EEXIST: [-17, 'file already exists'],
   ENOTDIR: [-20, 'not a directory'],
   EISDIR: [-21, 'illegal operation on a directory'],
@@ -8,7 +9,10 @@ export const FS_ERRORS = {
   ENOTEMPTY: [-39, 'directory not empty'],
 } as const;
 
-/** The error codes this library emulates on S3 (the filesystem and memory backends may report others). */
+/**
+ * The error codes every backend reports: they come from Node (fileSystem) or memfs (memory), or are emulated by the
+ * s3, ftp and sftp drivers (the fileSystem and memory backends may report others).
+ */
 export type StorageErrorCode = keyof typeof FS_ERRORS | 'ERR_FS_EISDIR';
 
 /**
@@ -26,7 +30,7 @@ export interface StorageError extends Error {
 
 /**
  * Structural type guard (not `instanceof`): true for any error-like value with a string `code`, which covers Node's
- * and memfs's own errors (they may come from another realm) as well as the ones thrown by the S3 backend. With
+ * and memfs's own errors (they may come from another realm) as well as the ones emulated by the s3, ftp and sftp drivers. With
  * `code`, it must match too. AWS SDK errors have `name`, not `code`, so they are not storage errors.
  */
 export function isStorageError(error: unknown, code?: StorageErrorCode | (string & {})): error is StorageError {

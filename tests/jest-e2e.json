@@ -4,9 +4,15 @@
   "testEnvironment": "node",
   "testRegex": ".e2e-spec.ts$",
   "transform": {
-    "^.+\\.ts$": ["ts-jest", { "tsconfig": "<rootDir>/tsconfig.json" }]
+    "^.+\\.ts$": [
+      "ts-jest",
+      {
+        "tsconfig": "<rootDir>/tsconfig.json"
+      }
+    ]
   },
   "globalSetup": "<rootDir>/support/global-setup.ts",
   "globalTeardown": "<rootDir>/support/global-teardown.ts",
-  "testTimeout": 60000
+  "testTimeout": 60000,
+  "maxWorkers": 4
 }

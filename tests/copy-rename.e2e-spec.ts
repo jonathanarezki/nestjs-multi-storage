@@ -9,6 +9,7 @@ import {
   expectFsError,
   S3_BACKEND,
   rawKeys,
+  s3Internals,
   S3_BUCKET,
   useCtx,
 } from './support/harness';
@@ -271,8 +272,8 @@ describeS3('multipart copy (S3)', () => {
     const ctx = await createCtx(S3_BACKEND, 'multipart');
     try {
       const { service } = ctx;
-      (service as any).copyThreshold = 5 * 1024 * 1024;
-      (service as any).copyPartSize = 5 * 1024 * 1024;
+      s3Internals(service).copyThreshold = 5 * 1024 * 1024;
+      s3Internals(service).copyPartSize = 5 * 1024 * 1024;
       const parts: string[] = [];
       service.s3client!.middlewareStack.add(
         (next, context) => async (args) => {

@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
-import { StorageModule, StorageService } from '../lib';
+import { StorageDisk, StorageModule, StorageService } from '../lib';
 import {
   collect,
   createCtx,
@@ -11,17 +11,13 @@ import {
   expectFsError,
   S3_BACKEND,
   S3_BUCKET,
+  s3Internals,
   s3Options,
   useCtx,
 } from './support/harness';
 
 /** writeFile that creates the parent folder first, as fs requires */
-async function put(
-  service: StorageService,
-  p: string,
-  data: Parameters<StorageService['writeFile']>[1],
-  options?: any,
-) {
+async function put(service: StorageDisk, p: string, data: Parameters<StorageService['writeFile']>[1], options?: any) {
   await service.mkdir(path.dirname(p));
   await service.writeFile(p, data, options);
 }
@@ -268,6 +264,44 @@ describeBackends('mkdir', (backend) => {
   });
 });
 
+describeBackends('writing below a file', (backend) => {
+  const h = useCtx(backend, 'write-below-file');
+
+  const writeThroughStream = (service: StorageDisk, p: string) =>
+    new Promise<void>((resolve, reject) => {
+      const ws = service.createWriteStream(p);
+      ws.on('error', reject).on('finish', () => resolve());
+      ws.end('child');
+    });
+
+  it('writeFile and createWriteStream below a file: ENOTDIR (open), except on S3 where folders are implicit', async () => {
+    const { service, errPath } = h.ctx;
+    await put(service, 'f', 'x');
+    if (backend.isS3) {
+      // Both keys `f` and `f/child` can exist: the file simply gets a child
+      await service.writeFile('f/child', 'a');
+      await writeThroughStream(service, 'f/child2');
+      expect(await service.readFile('f/child', 'utf8')).toBe('a');
+      expect(await service.readFile('f/child2', 'utf8')).toBe('child');
+      return;
+    }
+    await expectFsError(service.writeFile('f/child', 'y'), {
+      code: 'ENOTDIR',
+      errno: -20,
+      syscall: 'open',
+      path: errPath('f/child'),
+    });
+    await expectFsError(writeThroughStream(service, 'f/child'), {
+      code: 'ENOTDIR',
+      errno: -20,
+      syscall: 'open',
+      path: errPath('f/child'),
+    });
+    await expectFsError(service.writeFile('f/deeper/child', 'y'), { code: 'ENOTDIR', syscall: 'open' });
+    expect(await service.readFile('f', 'utf8')).toBe('x');
+  });
+});
+
 describeBackends('exists and copyFile edge cases', (backend) => {
   const h = useCtx(backend, 'exists');
 
@@ -444,8 +478,8 @@ describeS3('S3 specifics of the fs-compatible API', () => {
     await moduleRef.init();
     const service = moduleRef.get(StorageService);
     // The client keeps its endpoint; the service sees only endpointCDN
-    (service as any).endpoint = undefined;
-    (service as any).endpointCDN = 'http://127.0.0.1:1';
+    s3Internals(service).endpoint = undefined;
+    s3Internals(service).endpointCDN = 'http://127.0.0.1:1';
     const originalFetch = globalThis.fetch;
     const fetchSpy = jest.fn(originalFetch);
     globalThis.fetch = fetchSpy as typeof fetch;
