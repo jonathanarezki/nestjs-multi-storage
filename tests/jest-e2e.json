@@ -14,5 +14,9 @@
   "globalSetup": "<rootDir>/support/global-setup.ts",
   "globalTeardown": "<rootDir>/support/global-teardown.ts",
   "testTimeout": 60000,
-  "maxWorkers": 4
+  "maxWorkers": 4,
+  "moduleNameMapper": {
+    "^@webbar/node-multi-storage$": "<rootDir>/../packages/core/src",
+    "^nestjs-multi-storage$": "<rootDir>/../packages/nestjs/src"
+  }
 }

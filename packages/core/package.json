@@ -1,0 +1,75 @@
+{
+  "name": "@webbar/node-multi-storage",
+  "version": "0.7.0",
+  "description": "A framework-agnostic multi-storage filesystem manager for Node with an fs-compatible API (filesystem, S3, memory, FTP, SFTP)",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "keywords": [
+    "storage",
+    "filesystem",
+    "multi-storage",
+    "s3",
+    "ftp",
+    "sftp",
+    "memory",
+    "fs"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jonathanarezki/node-multi-storage.git",
+    "directory": "packages/core"
+  },
+  "bugs": {
+    "url": "https://github.com/jonathanarezki/node-multi-storage/issues"
+  },
+  "homepage": "https://github.com/jonathanarezki/node-multi-storage",
+  "author": "Jonathan Arezki <arezki@webbar.dev>",
+  "license": "MIT",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "mime-types": "^3.0.2"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.1160.0",
+    "@aws-sdk/lib-storage": "^3.1160.0",
+    "@aws-sdk/s3-request-presigner": "^3.1160.0",
+    "basic-ftp": "^6.2.5",
+    "memfs": "^4.80.0",
+    "ssh2": "^1.17.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": {
+      "optional": true
+    },
+    "@aws-sdk/lib-storage": {
+      "optional": true
+    },
+    "@aws-sdk/s3-request-presigner": {
+      "optional": true
+    },
+    "memfs": {
+      "optional": true
+    },
+    "basic-ftp": {
+      "optional": true
+    },
+    "ssh2": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -1,4 +1,4 @@
-import { S3Client } from '@aws-sdk/client-s3';
+import type { S3Client } from '@aws-sdk/client-s3';
 import { Readable, Writable } from 'stream';
 import {
   StorageCreateReadStreamOptions,
@@ -15,8 +15,8 @@ import { S3Driver } from './drivers/s3.driver';
 import { StorageDriver } from './interfaces/storage-driver.interface';
 
 /**
- * One named storage (filesystem, memory or S3) with the fs-compatible file API.
- * Created by the library: get it with `storage.disk(name)` or `@InjectStorage(name)`.
+ * One named storage (filesystem, memory, S3, FTP or SFTP) with the fs-compatible file API.
+ * Created by the library: get it with `storage.disk(name)` (nestjs-multi-storage also injects it with `@InjectStorage(name)`).
  */
 export class StorageDisk {
   /** @internal */

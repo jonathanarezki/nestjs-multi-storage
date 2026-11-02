@@ -41,7 +41,6 @@ export class FtpDriver implements StorageDriver {
   private readonly clients = new Set<FtpClient>();
   private idle: FtpClient[] = [];
   private readonly waiters: { resolve: (client: FtpClient) => void; reject: (error: Error) => void }[] = [];
-  private destroyed = false;
 
   constructor(options: StorageModuleOptions) {
     // basic-ftp is an optional peer dependency: only loaded when a 'ftp' disk is created
@@ -72,8 +71,11 @@ export class FtpDriver implements StorageDriver {
     // Connections are opened lazily, on the first operation
   }
 
+  /**
+   * Closes every connection and rejects the callers waiting for one. The pool stays usable: the next operation opens
+   * connections again. A connection still in use by an operation or being opened is closed too, and is never put back.
+   */
   async destroy(): Promise<void> {
-    this.destroyed = true;
     for (const waiter of this.waiters.splice(0)) waiter.reject(new Error('The ftp storage has been destroyed'));
     for (const client of this.clients) client.close();
     this.clients.clear();
@@ -279,7 +281,7 @@ export class FtpDriver implements StorageDriver {
       if (target && (mode ?? 0) & fs.constants.COPYFILE_EXCL) throw fsError('EEXIST', 'copyfile', from, to);
       if (from === to) return;
 
-      const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'nestjs-multi-storage-'));
+      const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'node-multi-storage-'));
       try {
         const local = path.join(folder, 'copy');
         await client.downloadTo(local, from);
@@ -452,7 +454,6 @@ export class FtpDriver implements StorageDriver {
 
   /** Takes an idle connection, opens one while below `maxConnections`, or waits (FIFO) for a released one. */
   private async acquire(): Promise<FtpClient> {
-    if (this.destroyed) throw new Error('The ftp storage has been destroyed');
     for (let client = this.idle.pop(); client; client = this.idle.pop()) {
       if (!client.closed) return client;
       // The server dropped it while idle
@@ -462,9 +463,16 @@ export class FtpDriver implements StorageDriver {
     return new Promise((resolve, reject) => this.waiters.push({ resolve, reject }));
   }
 
-  /** Gives the connection back; a closed or unusable one is discarded and its slot goes to the first waiter. */
+  /**
+   * Gives the connection back; a closed or unusable one is discarded and its slot goes to the first waiter.
+   * A connection that is no longer registered was closed by `destroy` meanwhile: it must not reach the pool again.
+   */
   private release(client: FtpClient) {
-    if (!client.closed && !this.destroyed) {
+    if (!this.clients.has(client)) {
+      client.close();
+      return;
+    }
+    if (!client.closed) {
       const waiter = this.waiters.shift();
       if (waiter) waiter.resolve(client);
       else this.idle.push(client);
@@ -492,11 +500,13 @@ export class FtpDriver implements StorageDriver {
         password: this.password,
         secure: this.secure,
       });
+      // `destroy` ran while connecting
+      if (!this.clients.has(client)) throw new Error('The ftp storage has been destroyed');
       return client;
     } catch (error) {
       client.close();
-      this.clients.delete(client);
-      this.openForWaiter();
+      // Only a still registered connection frees a slot (after `destroy` the slots belong to the new pool)
+      if (this.clients.delete(client)) this.openForWaiter();
       throw error;
     }
   }

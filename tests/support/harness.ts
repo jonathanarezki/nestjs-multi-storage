@@ -6,7 +6,8 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as util from 'util';
-import { StorageConfig, StorageDisk, StorageModule, StorageModuleOptions, StorageService } from '../../lib';
+import { createStorage, Storage } from '@webbar/node-multi-storage';
+import { StorageConfig, StorageDisk, StorageModule, StorageModuleOptions, StorageService } from 'nestjs-multi-storage';
 import { isSelected } from './selection';
 
 export type BackendName = 'fileSystem' | 's3' | 'memory' | 'ftp' | 'sftp';
@@ -139,10 +140,21 @@ export function useNamedDisk(enabled = true) {
   viaNamedDisk = enabled;
 }
 
+let standalone = false;
+/**
+ * Makes `createCtx` build every context with the framework-agnostic core (`createStorage(config)`: no Nest testing
+ * module, no `init()`, `destroy()` on close) instead: lets the behaviour suites prove that the core works on its own,
+ * including its lazy initialization. Applies to this test file only (jest isolates modules).
+ */
+export function useStandalone(enabled = true) {
+  standalone = enabled;
+}
+
 export interface Ctx {
   backend: Backend;
   /** The service, or (see `useNamedDisk`) a named disk: both have the whole file API */
   service: StorageDisk;
+  /** The Nest testing module (undefined in a standalone context, see `useStandalone`: only Nest-specific suites use it) */
   moduleRef: TestingModule;
   /** Prefix of this test: the tmp dir (fileSystem), the in-memory root (memory), the S3 key prefix or the remote directory (ftp, sftp) */
   prefix: string;
@@ -184,28 +196,38 @@ export async function createCtx(
   const config: StorageConfig = viaNamedDisk
     ? { default: 'main', disks: { main: { type: 'memory' }, named: options } }
     : options;
-  const moduleRef = await Test.createTestingModule({
-    imports: [
-      opts.async ? StorageModule.forRootAsync({ useFactory: async () => config }) : StorageModule.forRoot(config),
-    ],
-  }).compile();
-  await moduleRef.init();
-  const storage = moduleRef.get(StorageService);
+  let moduleRef: TestingModule | undefined;
+  let storage: Storage;
+  if (standalone) {
+    storage = createStorage(config);
+  } else {
+    moduleRef = await Test.createTestingModule({
+      imports: [
+        opts.async ? StorageModule.forRootAsync({ useFactory: async () => config }) : StorageModule.forRoot(config),
+      ],
+    }).compile();
+    await moduleRef.init();
+    storage = moduleRef.get(StorageService);
+  }
   const service = viaNamedDisk ? storage.disk('named') : storage;
   // Like the filesystem, a remote prefix must exist: create it (and its parents) for the test
   if (remote) await service.mkdir('');
+  // The S3 client is created by the first operation: a standalone context makes one (without init()), as the suites
+  // that tweak the client expect it to exist
+  if (standalone && backend.isS3) await service.exists('');
 
   return {
     backend,
     service,
-    moduleRef,
+    moduleRef: moduleRef as TestingModule,
     prefix,
     errPath: (p) => (backend.isS3 ? p : remote ? path.posix.join(prefix, p) : path.join(prefix, p)),
     async close() {
       if (backend.isS3 || remote) {
         await service.rmdir('').catch(() => undefined);
       }
-      await moduleRef.close();
+      if (moduleRef) await moduleRef.close();
+      else await storage.destroy();
       if (backend.name === 'fileSystem') {
         fs.rmSync(prefix, { recursive: true, force: true });
       }

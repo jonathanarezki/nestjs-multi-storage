@@ -3,7 +3,7 @@ import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { StorageModule, StorageModuleOptions, StorageService } from '../lib';
+import { StorageModule, StorageModuleOptions, StorageService } from 'nestjs-multi-storage';
 import { collect, describeMemory } from './support/harness';
 
 async function createModule(options: Partial<StorageModuleOptions> = {}) {
@@ -212,7 +212,7 @@ describeMemory('memory backend', () => {
           throw Object.assign(new Error("Cannot find module 'memfs'"), { code: 'MODULE_NOT_FOUND' });
         });
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { StorageService: Isolated } = require('../lib/storage.service');
+        const { StorageService: Isolated } = require('../packages/nestjs/src/storage.service');
         expect(() => new Isolated({ type: 'memory' })).toThrow(
           `type 'memory' requires the optional peer dependency "memfs": npm install memfs`,
         );
@@ -225,7 +225,7 @@ describeMemory('memory backend', () => {
           throw new Error('memfs must not be loaded');
         });
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { StorageService: Isolated } = require('../lib/storage.service');
+        const { StorageService: Isolated } = require('../packages/nestjs/src/storage.service');
         expect(() => new Isolated({ type: 'fileSystem', prefix: '/tmp' })).not.toThrow();
         expect(() => new Isolated({ type: 's3', bucket: 'b' })).not.toThrow();
       });

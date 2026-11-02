@@ -1,7 +1,7 @@
 import { DynamicModule, Module, Provider } from '@nestjs/common';
 import { StorageService } from './storage.service';
 import { getStorageToken } from './inject-storage.decorator';
-import { StorageConfig } from './interfaces';
+import { StorageConfig } from '@webbar/node-multi-storage';
 import { ASYNC_OPTIONS_TYPE, ConfigurableModuleClass, OPTIONS_TYPE } from './storage.module-definition';
 
 function diskProvider(name: string): Provider {

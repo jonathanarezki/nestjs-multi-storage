@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { StorageModule, StorageService } from '../lib';
+import { StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   collect,
   createCtx,

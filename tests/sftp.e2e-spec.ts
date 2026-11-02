@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as path from 'path';
 import { Client } from 'ssh2';
-import { StorageDisk, StorageModule, StorageService } from '../lib';
+import { StorageDisk, StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   collect,
   createCtx,

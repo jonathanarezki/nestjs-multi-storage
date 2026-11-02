@@ -50,11 +50,11 @@ export interface StorageModuleOptions {
 /** The options of one named disk (same shape as the single-store options). */
 export type StorageDiskOptions = StorageModuleOptions;
 
-/** Several named disks; `default` is the one `StorageService` itself operates on. */
+/** Several named disks; `default` is the one `Storage` itself operates on. */
 export interface StorageMultiDiskOptions {
   default: string;
   disks: Record<string, StorageDiskOptions>;
 }
 
-/** What `forRoot` / `forRootAsync` accept: a single store (the disk named `'default'`) or several named disks. */
+/** What `createStorage` (and nestjs-multi-storage's `StorageModule`) accepts: a single store (the disk named `'default'`) or several named disks. */
 export type StorageConfig = StorageModuleOptions | StorageMultiDiskOptions;

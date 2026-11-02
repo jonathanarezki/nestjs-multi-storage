@@ -13,34 +13,37 @@ import {
   StorageModule,
   StorageModuleOptions,
   StorageService,
-} from '../lib';
+} from 'nestjs-multi-storage';
 
 /** The public file API of 0.5.1 (generated from its StorageService d.ts): StorageService must stay assignable to it. */
 interface StorageService051 {
   readonly s3client: import('@aws-sdk/client-s3').S3Client | undefined;
   onModuleInit(): Promise<void>;
   onModuleDestroy(): Promise<void | undefined>;
-  mkdir(folderPath: string, options?: import('../lib').StorageMkdirOptions): Promise<string | undefined>;
-  readdir(folderPath: string, options?: BufferEncoding | import('../lib').StorageReaddirOptions): Promise<string[]>;
-  rmdir(folderPath: string, options?: import('../lib').StorageRmdirOptions): Promise<void>;
-  stat(p: string, options?: { bucket?: string }): Promise<import('../lib').StorageStats>;
+  mkdir(folderPath: string, options?: import('nestjs-multi-storage').StorageMkdirOptions): Promise<string | undefined>;
+  readdir(
+    folderPath: string,
+    options?: BufferEncoding | import('nestjs-multi-storage').StorageReaddirOptions,
+  ): Promise<string[]>;
+  rmdir(folderPath: string, options?: import('nestjs-multi-storage').StorageRmdirOptions): Promise<void>;
+  stat(p: string, options?: { bucket?: string }): Promise<import('nestjs-multi-storage').StorageStats>;
   exists(p: string, bucket?: string): Promise<boolean>;
   readFile(
     filePath: string,
-    options: BufferEncoding | (import('../lib').StorageReadFileOptions & { encoding: BufferEncoding }),
+    options: BufferEncoding | (import('nestjs-multi-storage').StorageReadFileOptions & { encoding: BufferEncoding }),
   ): Promise<string>;
   readFile(
     filePath: string,
-    options?: (import('../lib').StorageReadFileOptions & { encoding?: null }) | null,
+    options?: (import('nestjs-multi-storage').StorageReadFileOptions & { encoding?: null }) | null,
   ): Promise<Buffer>;
   readFile(
     filePath: string,
-    options?: BufferEncoding | import('../lib').StorageReadFileOptions | null,
+    options?: BufferEncoding | import('nestjs-multi-storage').StorageReadFileOptions | null,
   ): Promise<string | Buffer>;
   writeFile(
     filePath: string,
     data: string | Buffer | Uint8Array,
-    options?: BufferEncoding | import('../lib').StorageWriteFileOptions,
+    options?: BufferEncoding | import('nestjs-multi-storage').StorageWriteFileOptions,
   ): Promise<void>;
   getSignedUrl(
     filePath: string,
@@ -50,11 +53,14 @@ interface StorageService051 {
     filePath: string,
     opts?: { bucket?: string; expiresIn?: number; contentType?: string },
   ): Promise<string>;
-  rm(filePath: string, options?: import('../lib').StorageRmOptions): Promise<void>;
+  rm(filePath: string, options?: import('nestjs-multi-storage').StorageRmOptions): Promise<void>;
   copyFile(src: string, dest: string, mode?: number, bucket?: string): Promise<void>;
   rename(oldPath: string, newPath: string, bucket?: string): Promise<void>;
-  createReadStream(filePath: string, options?: import('../lib').StorageCreateReadStreamOptions): Readable;
-  createWriteStream(filePath: string, options?: import('../lib').StorageCreateWriteStreamOptions): Writable;
+  createReadStream(filePath: string, options?: import('nestjs-multi-storage').StorageCreateReadStreamOptions): Readable;
+  createWriteStream(
+    filePath: string,
+    options?: import('nestjs-multi-storage').StorageCreateWriteStreamOptions,
+  ): Writable;
 }
 
 // Compile-time checks (ts-jest reports type errors): nothing from 0.5.1 is removed or narrowed.

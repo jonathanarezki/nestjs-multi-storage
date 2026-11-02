@@ -1,13 +1,18 @@
 {
-  "extends": "../tsconfig.json",
+  "extends": "../tsconfig.base.json",
   "compilerOptions": {
     "target": "es2022",
     "rootDir": "..",
     "outDir": "../.tests-out",
     "noEmit": true,
     "declaration": false,
-    "types": ["jest", "node"]
+    "types": ["jest", "node"],
+    "baseUrl": "..",
+    "paths": {
+      "@webbar/node-multi-storage": ["packages/core/src"],
+      "nestjs-multi-storage": ["packages/nestjs/src"]
+    }
   },
-  "include": ["./**/*.ts", "../lib/**/*.ts"],
+  "include": ["./**/*.ts", "../packages/*/src/**/*.ts", "../scripts/**/*.ts"],
   "exclude": ["node_modules"]
 }

@@ -12,8 +12,8 @@ import {
 } from '.';
 
 /**
- * One storage backend (real disk, memory or S3) behind the fs-compatible file operations.
- * `init` runs when the storage starts (the S3 client is created there), `destroy` when it shuts down.
+ * One storage backend (real disk, memory, S3, FTP or SFTP) behind the fs-compatible file operations.
+ * `init` is an optional warm-up (every driver also initializes lazily on first use), `destroy` runs on shutdown.
  */
 export interface StorageDriver {
   init(): Promise<void>;

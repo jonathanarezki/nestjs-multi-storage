@@ -1,6 +1,6 @@
 import { Test } from '@nestjs/testing';
 import { randomBytes, randomUUID } from 'crypto';
-import { StorageDisk, StorageModule, StorageService } from '../lib';
+import { StorageDisk, StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   collect,
   createCtx,
@@ -114,13 +114,35 @@ describeFtp('ftp pool (maxConnections 2)', () => {
     expect(await service.exists('a.txt')).toBe(true);
   });
 
-  it('rejects after destroy, and closes every connection', async () => {
+  it('closes every connection on destroy, and reconnects on the next operation', async () => {
     const { service } = h.ctx;
     await service.writeFile('a.txt', 'a');
     const clients = [...internals(service).clients];
+    expect(clients.length).toBeGreaterThan(0);
     await internals(service).destroy();
     expect(clients.every((client: any) => client.closed)).toBe(true);
-    await expect(service.readFile('a.txt')).rejects.toThrow('destroyed');
+    expect(internals(service).clients.size).toBe(0);
+    expect(await service.readFile('a.txt', 'utf8')).toBe('a');
+    expect(clients.some((client: any) => internals(service).clients.has(client))).toBe(false);
+    expect(internals(service).clients.size).toBeGreaterThan(0);
+  });
+
+  it('closes the connection of an operation that is in flight during destroy, and does not pool it', async () => {
+    const { service } = h.ctx;
+    await service.writeFile('big.bin', Buffer.alloc(4 * MiB));
+    const stream = service.createReadStream('big.bin');
+    stream.on('error', () => undefined).pause();
+    await sleep(500);
+    const held = [...internals(service).clients];
+    await internals(service).destroy();
+    stream.destroy();
+    await sleep(100);
+    expect(held.every((client: any) => client.closed)).toBe(true);
+    // The destroyed connection did not come back: the pool is empty, and fully usable again
+    expect(internals(service).idle).toHaveLength(0);
+    expect(internals(service).clients.size).toBe(0);
+    expect(await service.stat('big.bin')).toMatchObject({ size: 4 * MiB });
+    expect(internals(service).clients.size).toBe(1);
   });
 
   it('rejects the callers that are still waiting for a connection on destroy', async () => {
@@ -135,6 +157,12 @@ describeFtp('ftp pool (maxConnections 2)', () => {
     expect(internals(service).waiters).toHaveLength(1);
     await internals(service).destroy();
     await expect(waiting).rejects.toThrow('destroyed');
+    streams.forEach((stream) => stream.destroy());
+    // Later operations reconnect, and the in-flight connections did not take a slot in the new pool
+    await sleep(100);
+    expect(await service.exists('big.bin')).toBe(true);
+    expect(internals(service).clients.size).toBeLessThanOrEqual(2);
+    expect(internals(service).waiters).toHaveLength(0);
   });
 
   it('getSignedUrl and getSignedPutUrl are not supported', async () => {

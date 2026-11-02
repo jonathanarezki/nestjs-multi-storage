@@ -14,7 +14,7 @@ import {
   StorageModule,
   StorageMultiDiskOptions,
   StorageService,
-} from '../lib';
+} from 'nestjs-multi-storage';
 import { collect, describeS3, rawKeys, s3Options } from './support/harness';
 
 const memory = { type: 'memory' as const };
@@ -369,9 +369,18 @@ describe('multi-disk: API completeness', () => {
       }
       expect('s3client' in disk).toBe(true);
     }
-    // the service adds only disk management on top of StorageDisk
-    const serviceOwn = Object.getOwnPropertyNames(StorageService.prototype).filter((n) => n !== 'constructor');
-    expect(serviceOwn.sort()).toEqual(['disk', 'diskNames', 'onModuleDestroy', 'onModuleInit']);
+    // the service adds only disk management and the lifecycle on top of StorageDisk (members up the prototype chain)
+    const members = new Set<string>();
+    for (
+      let proto = StorageService.prototype;
+      proto && proto !== StorageDisk.prototype;
+      proto = Object.getPrototypeOf(proto)
+    ) {
+      Object.getOwnPropertyNames(proto)
+        .filter((n) => n !== 'constructor')
+        .forEach((n) => members.add(n));
+    }
+    expect([...members].sort()).toEqual(['destroy', 'disk', 'diskNames', 'init', 'onModuleDestroy', 'onModuleInit']);
     await moduleRef.close();
   });
 });
@@ -582,7 +591,7 @@ describe('multi-disk: validation', () => {
           throw Object.assign(new Error("Cannot find module 'memfs'"), { code: 'MODULE_NOT_FOUND' });
         });
         // eslint-disable-next-line @typescript-eslint/no-require-imports
-        run(require('../lib/storage.service').StorageService);
+        run(require('../packages/nestjs/src/storage.service').StorageService);
       });
     }
 
@@ -603,6 +612,73 @@ describe('multi-disk: validation', () => {
     it('multi-disk without memory disks does not load memfs', () => {
       withoutMemfs((Isolated) => {
         expect(() => new Isolated({ default: 'a', disks: { a: { type: 's3', bucket: 'b' } } })).not.toThrow();
+      });
+    });
+  });
+
+  describe('missing AWS SDK packages', () => {
+    const INSTALL = 'npm install @aws-sdk/client-s3 @aws-sdk/lib-storage @aws-sdk/s3-request-presigner';
+    const PACKAGES = ['@aws-sdk/client-s3', '@aws-sdk/lib-storage', '@aws-sdk/s3-request-presigner'];
+    afterEach(() => {
+      for (const name of PACKAGES) jest.dontMock(name);
+    });
+
+    function without(missing: string[], run: (Isolated: typeof StorageService) => void) {
+      jest.isolateModules(() => {
+        for (const name of missing) {
+          jest.doMock(name, () => {
+            throw Object.assign(new Error(`Cannot find module '${name}'`), { code: 'MODULE_NOT_FOUND' });
+          });
+        }
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        run(require('../packages/nestjs/src/storage.service').StorageService);
+      });
+    }
+
+    const errorOf = (fn: () => unknown): any => {
+      try {
+        fn();
+      } catch (error) {
+        return error;
+      }
+      return undefined;
+    };
+
+    it.each([
+      [
+        ['@aws-sdk/client-s3', '@aws-sdk/lib-storage', '@aws-sdk/s3-request-presigner'],
+        '"@aws-sdk/client-s3", "@aws-sdk/lib-storage" and "@aws-sdk/s3-request-presigner"',
+        'dependencies',
+      ],
+      [['@aws-sdk/lib-storage'], '"@aws-sdk/lib-storage"', 'dependency'],
+      // lib-storage requires client-s3 itself, so without it that cannot load either
+      [['@aws-sdk/client-s3'], '"@aws-sdk/client-s3" and "@aws-sdk/lib-storage"', 'dependencies'],
+      [['@aws-sdk/s3-request-presigner'], '"@aws-sdk/s3-request-presigner"', 'dependency'],
+      [
+        ['@aws-sdk/lib-storage', '@aws-sdk/s3-request-presigner'],
+        '"@aws-sdk/lib-storage" and "@aws-sdk/s3-request-presigner"',
+        'dependencies',
+      ],
+    ])('single store, missing %j: the error names only those', (missing, names, noun) => {
+      without(missing, (Isolated) => {
+        const error = errorOf(() => new Isolated({ type: 's3', bucket: 'b' }));
+        expect(error.message).toBe(`type 's3' requires the optional peer ${noun} ${names}: ${INSTALL}`);
+        expect(error.cause.code).toBe('MODULE_NOT_FOUND');
+      });
+    });
+
+    it('multi-disk: the error is prefixed with the disk name', () => {
+      without(['@aws-sdk/lib-storage'], (Isolated) => {
+        const config = { default: 'a', disks: { a: { type: 'fileSystem' as const }, files: { type: 's3' as const } } };
+        expect(errorOf(() => new Isolated(config)).message).toBe(
+          `Storage disk "files": type 's3' requires the optional peer dependency "@aws-sdk/lib-storage": ${INSTALL}`,
+        );
+      });
+    });
+
+    it('other disk types do not load the SDK', () => {
+      without(PACKAGES, (Isolated) => {
+        expect(() => new Isolated({ default: 'a', disks: { a: { type: 'fileSystem' }, m: memory } })).not.toThrow();
       });
     });
   });

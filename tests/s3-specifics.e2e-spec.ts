@@ -1,7 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { randomUUID } from 'crypto';
-import { StorageModule, StorageService } from '../lib';
+import { StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   createCtx,
   describeBackends,

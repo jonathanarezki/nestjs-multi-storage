@@ -5,8 +5,8 @@ on:
     branches:
       - main
     paths:
-      - 'package.json'
-  workflow_dispatch: # re-run a release for the current version, e.g. after fixing a failed run
+      - 'packages/*/package.json'
+  workflow_dispatch: # re-run a release for the current versions, e.g. after fixing a failed run
 
 concurrency:
   group: release
@@ -14,52 +14,75 @@ concurrency:
 
 jobs:
   meta:
-    name: Determine version and what is left to do
+    name: Determine versions and what is left to do
     runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
-      version: ${{ steps.meta.outputs.version }}
-      prerelease: ${{ steps.meta.outputs.prerelease }}
-      publish: ${{ steps.meta.outputs.publish }}
-      release: ${{ steps.meta.outputs.release }}
+      any_publish: ${{ steps.meta.outputs.any_publish }}
+      core_name: ${{ steps.meta.outputs.core_name }}
+      core_version: ${{ steps.meta.outputs.core_version }}
+      core_prerelease: ${{ steps.meta.outputs.core_prerelease }}
+      core_publish: ${{ steps.meta.outputs.core_publish }}
+      core_release: ${{ steps.meta.outputs.core_release }}
+      nestjs_name: ${{ steps.meta.outputs.nestjs_name }}
+      nestjs_version: ${{ steps.meta.outputs.nestjs_version }}
+      nestjs_prerelease: ${{ steps.meta.outputs.nestjs_prerelease }}
+      nestjs_publish: ${{ steps.meta.outputs.nestjs_publish }}
+      nestjs_release: ${{ steps.meta.outputs.nestjs_release }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
 
-      - name: Determine version and what is left to do
+      - name: Determine versions and what is left to do
         id: meta
         run: |
-          VERSION=$(jq -r .version package.json)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Detected version: $VERSION"
+          any_publish=false
 
-          if [[ "$VERSION" == *-* ]]; then
-            echo "prerelease=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "prerelease=false" >> "$GITHUB_OUTPUT"
-          fi
+          # $1 = output prefix, $2 = package directory
+          check() {
+            local key="$1" dir="$2"
+            local name version tag
+            name=$(jq -r .name "packages/$dir/package.json")
+            version=$(jq -r .version "packages/$dir/package.json")
+            tag="$name@$version"
+            echo "Detected $tag"
+            echo "${key}_name=$name" >> "$GITHUB_OUTPUT"
+            echo "${key}_version=$version" >> "$GITHUB_OUTPUT"
 
-          # npm and the GitHub release are checked independently, so a re-run completes a partial release
-          if [ -n "$(npm view "nestjs-multi-storage@$VERSION" version 2>/dev/null)" ]; then
-            echo "Version $VERSION is already on npm."
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+            if [[ "$version" == *-* ]]; then
+              echo "${key}_prerelease=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "${key}_prerelease=false" >> "$GITHUB_OUTPUT"
+            fi
 
-          if git ls-remote --exit-code --tags origin "refs/tags/v$VERSION" >/dev/null 2>&1; then
-            echo "Tag v$VERSION already exists."
-            echo "release=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "release=true" >> "$GITHUB_OUTPUT"
-          fi
+            # npm and the GitHub release are checked independently, so a re-run completes a partial release.
+            # A package that does not exist on npm yet prints nothing, which also counts as "not published".
+            if [ -n "$(npm view "$tag" version 2>/dev/null)" ]; then
+              echo "$tag is already on npm."
+              echo "${key}_publish=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "${key}_publish=true" >> "$GITHUB_OUTPUT"
+              any_publish=true
+            fi
+
+            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+              echo "Tag $tag already exists."
+              echo "${key}_release=false" >> "$GITHUB_OUTPUT"
+            else
+              echo "${key}_release=true" >> "$GITHUB_OUTPUT"
+            fi
+          }
+
+          check core core
+          check nestjs nestjs
+          echo "any_publish=$any_publish" >> "$GITHUB_OUTPUT"
 
   test:
     name: Test on Node ${{ matrix.node }}
     needs: meta
-    if: needs.meta.outputs.publish == 'true'
+    if: needs.meta.outputs.any_publish == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -82,13 +105,17 @@ jobs:
 
       - name: Lint
         # Without --fix, so formatting problems fail the build instead of being fixed silently
-        run: npx eslint 'lib/**/*.ts'
+        run: npx eslint 'packages/*/src/**/*.ts'
 
       - name: Check formatting
-        run: npx prettier --check 'lib/**/*.ts' 'tests/**/*.ts'
+        run: npx prettier --check 'packages/*/src/**/*.ts' 'tests/**/*.ts' 'scripts/**/*.ts'
 
       - name: Build
+        # Before the tests: one of them spawns a child process that needs dist
         run: npm run build
+
+      - name: Check API compatibility with 0.6.0
+        run: npm run check:api
 
       - name: Test (e2e, starts adobe/s3mock via Docker)
         env:
@@ -96,9 +123,9 @@ jobs:
         run: npm run test:e2e
 
   release:
-    name: Publish to npm and create GitHub release
+    name: Publish to npm and create GitHub releases
     needs: [meta, test]
-    # test is skipped when the version is already on npm; a failed or cancelled test blocks the release
+    # test is skipped when nothing needs publishing; a failed or cancelled test blocks the release
     if: always() && needs.meta.result == 'success' && (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
@@ -110,65 +137,86 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Setup Node.js
-        if: needs.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.any_publish == 'true'
         uses: actions/setup-node@v6
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Upgrade npm to the 11.x line (trusted publishing needs >= 11.5.1)
-        if: needs.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.any_publish == 'true'
         run: npm install -g npm@11
 
       - name: Install dependencies
-        if: needs.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.any_publish == 'true'
         run: npm ci
 
       - name: Build
-        if: needs.meta.outputs.publish == 'true'
+        if: needs.meta.outputs.any_publish == 'true'
         run: npm run build
 
-      - name: Publish to npm
-        if: needs.meta.outputs.publish == 'true'
+      # The core goes first: nestjs-multi-storage depends on it
+      - name: Publish ${{ needs.meta.outputs.core_name }} to npm
+        if: needs.meta.outputs.core_publish == 'true'
         env:
-          VERSION: ${{ needs.meta.outputs.version }}
-          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+          PACKAGE: ${{ needs.meta.outputs.core_name }}
+          PRERELEASE: ${{ needs.meta.outputs.core_prerelease }}
         run: |
           if [ "$PRERELEASE" = "true" ]; then
-            npm publish --access public --tag next
+            npm publish -w "$PACKAGE" --access public --tag next
           else
-            npm publish --access public
+            npm publish -w "$PACKAGE" --access public
           fi
 
-      - name: Extract release notes from CHANGELOG.md
-        id: notes
-        if: needs.meta.outputs.release == 'true'
+      - name: Publish ${{ needs.meta.outputs.nestjs_name }} to npm
+        if: needs.meta.outputs.nestjs_publish == 'true'
         env:
-          VERSION: ${{ needs.meta.outputs.version }}
+          PACKAGE: ${{ needs.meta.outputs.nestjs_name }}
+          PRERELEASE: ${{ needs.meta.outputs.nestjs_prerelease }}
         run: |
-          awk -v header="## [$VERSION]" '
-            index($0, header) == 1 { found = 1; next }
-            found && /^## \[/ { exit }
-            found { print }
-          ' CHANGELOG.md > "$RUNNER_TEMP/release-notes.md"
-          if grep -q '[^[:space:]]' "$RUNNER_TEMP/release-notes.md"; then
-            echo "found=true" >> "$GITHUB_OUTPUT"
-            echo "path=$RUNNER_TEMP/release-notes.md" >> "$GITHUB_OUTPUT"
+          if [ "$PRERELEASE" = "true" ]; then
+            npm publish -w "$PACKAGE" --access public --tag next
           else
-            echo "No CHANGELOG section for $VERSION, falling back to generated notes."
-            echo "found=false" >> "$GITHUB_OUTPUT"
+            npm publish -w "$PACKAGE" --access public
           fi
 
-      - name: Create GitHub release
-        if: needs.meta.outputs.release == 'true'
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.meta.outputs.version }}
-          target_commitish: ${{ github.sha }}
-          name: Release v${{ needs.meta.outputs.version }}
-          body_path: ${{ steps.notes.outputs.found == 'true' && steps.notes.outputs.path || '' }}
-          draft: false
-          prerelease: ${{ needs.meta.outputs.prerelease == 'true' }}
-          generate_release_notes: ${{ steps.notes.outputs.found != 'true' }}
+      - name: Create GitHub releases
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CORE_NAME: ${{ needs.meta.outputs.core_name }}
+          CORE_VERSION: ${{ needs.meta.outputs.core_version }}
+          CORE_PRERELEASE: ${{ needs.meta.outputs.core_prerelease }}
+          CORE_RELEASE: ${{ needs.meta.outputs.core_release }}
+          NESTJS_NAME: ${{ needs.meta.outputs.nestjs_name }}
+          NESTJS_VERSION: ${{ needs.meta.outputs.nestjs_version }}
+          NESTJS_PRERELEASE: ${{ needs.meta.outputs.nestjs_prerelease }}
+          NESTJS_RELEASE: ${{ needs.meta.outputs.nestjs_release }}
+        run: |
+          # $1 = package directory, $2 = name, $3 = version, $4 = prerelease (true/false), $5 = release needed (true/false)
+          release() {
+            local dir="$1" name="$2" version="$3" prerelease="$4" needed="$5"
+            local tag="$name@$version" notes="$RUNNER_TEMP/notes-$1.md"
+            if [ "$needed" != "true" ]; then
+              echo "Release $tag already exists, skipping."
+              return
+            fi
+
+            awk -v header="## [$version]" '
+              index($0, header) == 1 { found = 1; next }
+              found && /^## \[/ { exit }
+              found { print }
+            ' "packages/$dir/CHANGELOG.md" > "$notes"
+
+            args=(--target "$GITHUB_SHA" --title "$name $version")
+            if [ "$prerelease" = "true" ]; then args+=(--prerelease); fi
+            if grep -q '[^[:space:]]' "$notes"; then
+              args+=(--notes-file "$notes")
+            else
+              echo "No CHANGELOG section for $tag, falling back to generated notes."
+              args+=(--generate-notes)
+            fi
+            gh release create "$tag" "${args[@]}"
+          }
+
+          release core "$CORE_NAME" "$CORE_VERSION" "$CORE_PRERELEASE" "$CORE_RELEASE"
+          release nestjs "$NESTJS_NAME" "$NESTJS_VERSION" "$NESTJS_PRERELEASE" "$NESTJS_RELEASE"

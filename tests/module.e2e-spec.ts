@@ -4,7 +4,7 @@ import { Test } from '@nestjs/testing';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { StorageModule, StorageModuleOptions, StorageService } from '../lib';
+import { StorageModule, StorageModuleOptions, StorageService } from 'nestjs-multi-storage';
 import { describeS3, s3Options } from './support/harness';
 
 @Injectable()

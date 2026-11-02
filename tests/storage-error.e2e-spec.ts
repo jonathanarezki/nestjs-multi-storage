@@ -1,5 +1,5 @@
 import { ListObjectsV2Command, NoSuchBucket } from '@aws-sdk/client-s3';
-import { isStorageError, StorageError } from '../lib';
+import { isStorageError, StorageError } from 'nestjs-multi-storage';
 import { describeBackends, describeS3, S3_BACKEND, createCtx, useCtx } from './support/harness';
 
 describeBackends('isStorageError', (backend) => {

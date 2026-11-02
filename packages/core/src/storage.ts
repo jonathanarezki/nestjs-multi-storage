@@ -1,5 +1,3 @@
-import { Inject, Injectable, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { MODULE_OPTIONS_TOKEN } from './storage.module-definition';
 import { StorageConfig, StorageDiskOptions, StorageMultiDiskOptions } from './interfaces';
 import { FileSystemDriver } from './drivers/file-system.driver';
 import { FtpDriver } from './drivers/ftp.driver';
@@ -74,12 +72,11 @@ function createDrivers(config: StorageConfig): { drivers: Map<string, StorageDri
  * The default disk (it has the whole file API itself) and the entry point to the other named disks.
  * A single-store configuration is one disk named `'default'`.
  */
-@Injectable()
-export class StorageService extends StorageDisk implements OnModuleInit, OnModuleDestroy {
+export class Storage extends StorageDisk {
   private readonly drivers: Map<string, StorageDriver>;
   private readonly disks = new Map<string, StorageDisk>();
 
-  constructor(@Inject(MODULE_OPTIONS_TOKEN) config: StorageConfig) {
+  constructor(config: StorageConfig) {
     const { drivers, defaultName } = createDrivers(config);
     super(drivers.get(defaultName)!);
     this.drivers = drivers;
@@ -90,7 +87,10 @@ export class StorageService extends StorageDisk implements OnModuleInit, OnModul
     return [...this.drivers.keys()];
   }
 
-  /** The disk configured under `name` (the default disk too: it shares its storage with this service). */
+  /**
+   * The disk configured under `name` (the default disk too: it shares its storage with this instance).
+   * Throws for an unknown name.
+   */
   disk(name: string): StorageDisk {
     let disk = this.disks.get(name);
     if (!disk) {
@@ -104,15 +104,31 @@ export class StorageService extends StorageDisk implements OnModuleInit, OnModul
     return disk;
   }
 
-  async onModuleInit() {
+  /**
+   * Optional eager warm-up of all disks (e.g. creates the S3 clients). Every disk also initializes itself on first
+   * use, so calling this is not required; nestjs-multi-storage calls it on module init.
+   */
+  async init(): Promise<void> {
     await Promise.all([...this.drivers.values()].map((driver) => driver.init()));
   }
 
-  async onModuleDestroy(): Promise<void | undefined> {
+  /**
+   * Closes the connections and clients of all disks. Recommended on shutdown; in serverless environments it is
+   * optional. The disks stay usable: S3, FTP and SFTP reconnect on the next operation.
+   */
+  async destroy(): Promise<void | undefined> {
     const results = await Promise.allSettled([...this.drivers.values()].map((driver) => driver.destroy()));
     const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
     if (failed) {
       throw failed.reason;
     }
   }
+}
+
+/**
+ * Creates the storage from a single-store or multi-disk configuration, without any framework.
+ * No `init()` is needed: connections and clients are created on first use.
+ */
+export function createStorage(config: StorageConfig): Storage {
+  return new Storage(config);
 }

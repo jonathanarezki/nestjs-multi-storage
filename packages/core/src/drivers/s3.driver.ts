@@ -1,25 +1,11 @@
-import {
-  AbortMultipartUploadCommand,
-  CompleteMultipartUploadCommand,
+import type {
   CompletedPart,
-  CopyObjectCommand,
-  CreateMultipartUploadCommand,
-  DeleteObjectCommand,
-  DeleteObjectsCommand,
-  GetObjectCommand,
-  GetObjectTaggingCommand,
-  HeadObjectCommand,
   HeadObjectCommandOutput,
-  ListObjectsV2Command,
   ListObjectsV2CommandInput,
   ObjectStorageClass,
-  PutObjectCommand,
   S3Client,
   StorageClass,
-  UploadPartCopyCommand,
 } from '@aws-sdk/client-s3';
-import { Upload } from '@aws-sdk/lib-storage';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as stream from 'stream';
@@ -59,6 +45,10 @@ function isMissingKey(e: any) {
 
 /** The `s3` backend: keys below an optional prefix of the bucket, with fs-compatible semantics and errors. */
 export class S3Driver implements StorageDriver {
+  /** The lazily loaded AWS SDK modules (private: their types must not leak into the emitted .d.ts) */
+  private readonly sdk: typeof import('@aws-sdk/client-s3');
+  private readonly libStorage: typeof import('@aws-sdk/lib-storage');
+  private readonly presigner: typeof import('@aws-sdk/s3-request-presigner');
   private s3Client: S3Client | undefined;
 
   private readonly prefix: string;
@@ -75,6 +65,33 @@ export class S3Driver implements StorageDriver {
   private copyPartSize = COPY_PART_SIZE;
 
   constructor(private options: StorageModuleOptions) {
+    // The AWS SDK is an optional peer dependency: only loaded when an 's3' disk is created. All three packages are
+    // loaded here, so that a missing one fails at startup and not mid-request.
+    const missing: string[] = [];
+    let cause: unknown;
+    const load = (name: string) => {
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        return require(name);
+      } catch (error: any) {
+        if (error?.code !== 'MODULE_NOT_FOUND') throw error;
+        missing.push(`"${name}"`);
+        cause ??= error;
+      }
+    };
+    this.sdk = load('@aws-sdk/client-s3');
+    this.libStorage = load('@aws-sdk/lib-storage');
+    this.presigner = load('@aws-sdk/s3-request-presigner');
+    if (missing.length > 0) {
+      const names = missing.length > 1 ? `${missing.slice(0, -1).join(', ')} and ${missing.at(-1)}` : missing[0];
+      throw Object.assign(
+        new Error(
+          `type 's3' requires the optional peer ${missing.length > 1 ? 'dependencies' : 'dependency'} ${names}: ` +
+            'npm install @aws-sdk/client-s3 @aws-sdk/lib-storage @aws-sdk/s3-request-presigner',
+        ),
+        { cause },
+      );
+    }
     this.endpoint = options.endpoint;
     this.endpointCDN = options.endpointCDN;
     this.region = options.region;
@@ -85,14 +102,27 @@ export class S3Driver implements StorageDriver {
     this.prefix = options.prefix ?? '';
   }
 
-  /** Undefined until `init` has run */
+  /** Undefined until the client has been created (by `init` or the first operation), and after `destroy` */
   get client() {
     return this.s3Client;
   }
 
+  /** Creates the client eagerly (optional: the first operation does it otherwise). */
   async init(): Promise<void> {
+    this.getClient();
+  }
+
+  /** Closes the client; a later operation creates a new one. */
+  async destroy(): Promise<void> {
+    const client = this.s3Client;
+    this.s3Client = undefined;
+    return client?.destroy();
+  }
+
+  /** The client, created on first use (synchronously, so that concurrent first calls share the one instance). */
+  private getClient(): S3Client {
     // Without explicit options the SDK falls back to its defaults (AWS_REGION, IAM roles, ~/.aws, ...)
-    this.s3Client = new S3Client({
+    return (this.s3Client ??= new this.sdk.S3Client({
       endpoint: this.endpoint,
       region: this.region,
       forcePathStyle: this.forcePathStyle ?? undefined,
@@ -106,11 +136,7 @@ export class S3Driver implements StorageDriver {
         this.accessKeyId && this.secretAccessKey
           ? { accessKeyId: this.accessKeyId, secretAccessKey: this.secretAccessKey }
           : undefined,
-    });
-  }
-
-  async destroy(): Promise<void> {
-    return this.s3Client?.destroy();
+    }));
   }
 
   /** Unlike `fs.promises.mkdir`, `recursive` defaults to `true`. */
@@ -140,8 +166,13 @@ export class S3Driver implements StorageDriver {
       }
     }
 
-    await this.s3Client!.send(
-      new PutObjectCommand({ Bucket: bucket, Key: this.normalizeDirKey(folderPath), Body: '', ContentLength: 0 }),
+    await this.getClient().send(
+      new this.sdk.PutObjectCommand({
+        Bucket: bucket,
+        Key: this.normalizeDirKey(folderPath),
+        Body: '',
+        ContentLength: 0,
+      }),
     );
     return undefined;
   }
@@ -214,7 +245,9 @@ export class S3Driver implements StorageDriver {
         throw fsError('ENOTDIR', 'rmdir', folderPath);
       }
       // fs.rm(path, { recursive: true }) removes a file as well
-      await this.s3Client!.send(new DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(folderPath) }));
+      await this.getClient().send(
+        new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(folderPath) }),
+      );
       return;
     }
 
@@ -228,7 +261,7 @@ export class S3Driver implements StorageDriver {
     }
     // The bucket root has no marker object
     if (dirKey) {
-      await this.s3Client!.send(new DeleteObjectCommand({ Bucket: bucket, Key: dirKey }));
+      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: dirKey }));
     }
   }
 
@@ -286,9 +319,9 @@ export class S3Driver implements StorageDriver {
 
     let buffer: Buffer;
     if (this.endpoint && this.endpointCDN) {
-      const result = await getSignedUrl(
-        this.s3Client as any,
-        new GetObjectCommand({ Bucket: bucket, Key: key }) as any,
+      const result = await this.presigner.getSignedUrl(
+        this.getClient() as any,
+        new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key }) as any,
         {
           expiresIn: 60,
         },
@@ -305,7 +338,7 @@ export class S3Driver implements StorageDriver {
       buffer = Buffer.from(await response.arrayBuffer());
     } else {
       try {
-        const data = await this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+        const data = await this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key }));
         buffer = await streamToBuffer(data.Body as Readable);
       } catch (e: any) {
         throw isMissingKey(e) ? await this.missingFileError(bucket, filePath) : e;
@@ -325,8 +358,8 @@ export class S3Driver implements StorageDriver {
     const bucket = this.s3Bucket(optionsBucket);
     const key = this.writeKey(filePath, 'open');
 
-    await this.s3Client!.send(
-      new PutObjectCommand({
+    await this.getClient().send(
+      new this.sdk.PutObjectCommand({
         Bucket: bucket,
         Key: key,
         Body: typeof data === 'string' ? Buffer.from(data, encoding) : data,
@@ -340,14 +373,14 @@ export class S3Driver implements StorageDriver {
     opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string; responseContentType?: string },
   ): Promise<string> {
     const bucket = this.s3Bucket(opts?.bucket);
-    const command = new GetObjectCommand({
+    const command = new this.sdk.GetObjectCommand({
       Bucket: bucket,
       Key: this.normalizeKey(filePath),
       ResponseContentDisposition: opts?.responseContentDisposition,
       ResponseContentType: opts?.responseContentType,
     });
 
-    const url = await getSignedUrl(this.s3Client!, command, { expiresIn: opts?.expiresIn ?? 60 });
+    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts?.expiresIn ?? 60 });
 
     if (this.endpointCDN && this.endpoint) {
       return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
@@ -360,13 +393,13 @@ export class S3Driver implements StorageDriver {
     opts?: { bucket?: string; expiresIn?: number; contentType?: string },
   ): Promise<string> {
     const bucket = this.s3Bucket(opts?.bucket);
-    const command = new PutObjectCommand({
+    const command = new this.sdk.PutObjectCommand({
       Bucket: bucket,
       Key: this.normalizeKey(filePath),
       ContentType: opts?.contentType,
     });
 
-    const url = await getSignedUrl(this.s3Client!, command, { expiresIn: opts?.expiresIn ?? 60 });
+    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts?.expiresIn ?? 60 });
 
     if (this.endpointCDN && this.endpoint) {
       return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
@@ -392,7 +425,7 @@ export class S3Driver implements StorageDriver {
       return this.deleteTree(bucket, this.normalizeDirKey(filePath));
     }
 
-    await this.s3Client!.send(new DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) }));
+    await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) }));
   }
 
   async copyFile(src: string, dest: string, mode?: number, bucket?: string): Promise<void> {
@@ -465,7 +498,7 @@ export class S3Driver implements StorageDriver {
       await this.copyObject(srcKey, destKey, entry.file.size, bucket, {
         storageClass: entry.file.storageClass,
       });
-      await this.s3Client!.send(new DeleteObjectCommand({ Bucket: bucket, Key: srcKey }));
+      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: srcKey }));
       return;
     }
 
@@ -512,7 +545,7 @@ export class S3Driver implements StorageDriver {
 
     // The bucket root is no object key: nothing to GET
     const request = key
-      ? this.s3Client!.send(new GetObjectCommand({ Bucket: bucket, Key: key, Range }))
+      ? this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key, Range }))
       : Promise.reject({ name: 'NoSuchKey' });
     request
       .then(({ Body }) => (Body as Readable).pipe(pass))
@@ -533,8 +566,8 @@ export class S3Driver implements StorageDriver {
     const key = this.writeKey(filePath, 'open');
 
     const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
-    const upload = new Upload({
-      client: this.s3Client!,
+    const upload = new this.libStorage.Upload({
+      client: this.getClient(),
       params: {
         Bucket: bucket,
         Key: key,
@@ -729,7 +762,7 @@ export class S3Driver implements StorageDriver {
   private async *listObjects(input: ListObjectsV2CommandInput) {
     let ContinuationToken: string | undefined;
     do {
-      const output = await this.s3Client!.send(new ListObjectsV2Command({ ...input, ContinuationToken }));
+      const output = await this.getClient().send(new this.sdk.ListObjectsV2Command({ ...input, ContinuationToken }));
       yield output;
       ContinuationToken = output.IsTruncated ? output.NextContinuationToken : undefined;
     } while (ContinuationToken);
@@ -737,7 +770,7 @@ export class S3Driver implements StorageDriver {
 
   private async headObject(bucket: string | undefined, key: string): Promise<HeadObjectCommandOutput | undefined> {
     try {
-      return await this.s3Client!.send(new HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: bucket, Key: key }));
     } catch (e: any) {
       if (isNotFound(e)) {
         return undefined;
@@ -748,7 +781,9 @@ export class S3Driver implements StorageDriver {
 
   /** The first object key (UTF-8 byte order) that starts with `prefix`, if any. */
   private async listFirst(bucket: string | undefined, prefix: string) {
-    const output = await this.s3Client!.send(new ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 1 }));
+    const output = await this.getClient().send(
+      new this.sdk.ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 1 }),
+    );
     return output.Contents?.[0];
   }
 
@@ -763,8 +798,8 @@ export class S3Driver implements StorageDriver {
         continue;
       }
 
-      const result = await this.s3Client!.send(
-        new DeleteObjectsCommand({
+      const result = await this.getClient().send(
+        new this.sdk.DeleteObjectsCommand({
           Bucket: bucket,
           Delete: { Objects: keys.map((key) => ({ Key: key })), Quiet: true },
         }),
@@ -846,8 +881,8 @@ export class S3Driver implements StorageDriver {
     let failure: { error: unknown } | undefined;
     for (let i = 0; i < keys.length; i += 1000) {
       try {
-        const result = await this.s3Client!.send(
-          new DeleteObjectsCommand({
+        const result = await this.getClient().send(
+          new this.sdk.DeleteObjectsCommand({
             Bucket: bucket,
             Delete: { Objects: keys.slice(i, i + 1000).map((key) => ({ Key: key })), Quiet: true },
           }),
@@ -887,8 +922,8 @@ export class S3Driver implements StorageDriver {
 
     if (size <= this.copyThreshold) {
       // ContentType, metadata and tags are copied by default
-      await this.s3Client!.send(
-        new CopyObjectCommand({
+      await this.getClient().send(
+        new this.sdk.CopyObjectCommand({
           Bucket: bucket,
           Key: destKey,
           CopySource,
@@ -899,10 +934,10 @@ export class S3Driver implements StorageDriver {
       return;
     }
 
-    const head = await this.s3Client!.send(new HeadObjectCommand({ Bucket: bucket, Key: srcKey }));
+    const head = await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: bucket, Key: srcKey }));
     const Tagging = await this.getTagging(bucket, srcKey);
-    const { UploadId } = await this.s3Client!.send(
-      new CreateMultipartUploadCommand({
+    const { UploadId } = await this.getClient().send(
+      new this.sdk.CreateMultipartUploadCommand({
         Bucket: bucket,
         Key: destKey,
         ContentType: head.ContentType,
@@ -922,8 +957,8 @@ export class S3Driver implements StorageDriver {
       const parts: CompletedPart[] = [];
       for (let start = 0, partNumber = 1; start < size; start += partSize, partNumber++) {
         const end = Math.min(start + partSize, size) - 1;
-        const part = await this.s3Client!.send(
-          new UploadPartCopyCommand({
+        const part = await this.getClient().send(
+          new this.sdk.UploadPartCopyCommand({
             Bucket: bucket,
             Key: destKey,
             UploadId,
@@ -935,8 +970,8 @@ export class S3Driver implements StorageDriver {
         parts.push({ PartNumber: partNumber, ETag: part.CopyPartResult?.ETag });
       }
 
-      await this.s3Client!.send(
-        new CompleteMultipartUploadCommand({
+      await this.getClient().send(
+        new this.sdk.CompleteMultipartUploadCommand({
           Bucket: bucket,
           Key: destKey,
           UploadId,
@@ -945,9 +980,9 @@ export class S3Driver implements StorageDriver {
         }),
       );
     } catch (e) {
-      await this.s3Client!.send(new AbortMultipartUploadCommand({ Bucket: bucket, Key: destKey, UploadId })).catch(
-        () => undefined,
-      );
+      await this.getClient()
+        .send(new this.sdk.AbortMultipartUploadCommand({ Bucket: bucket, Key: destKey, UploadId }))
+        .catch(() => undefined);
       throw e;
     }
   }
@@ -958,7 +993,9 @@ export class S3Driver implements StorageDriver {
    */
   private async getTagging(bucket: string | undefined, key: string): Promise<string | undefined> {
     try {
-      const { TagSet } = await this.s3Client!.send(new GetObjectTaggingCommand({ Bucket: bucket, Key: key }));
+      const { TagSet } = await this.getClient().send(
+        new this.sdk.GetObjectTaggingCommand({ Bucket: bucket, Key: key }),
+      );
       return (
         TagSet?.map(({ Key, Value }) => `${encodeURIComponent(Key ?? '')}=${encodeURIComponent(Value ?? '')}`).join(
           '&',

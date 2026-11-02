@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "skipLibCheck": false,
+    "types": ["node"]
+  },
+  "include": ["check.ts"]
+}

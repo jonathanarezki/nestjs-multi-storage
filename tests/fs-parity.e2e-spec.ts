@@ -2,7 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
-import { StorageDisk, StorageModule, StorageService } from '../lib';
+import { StorageDisk, StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   collect,
   createCtx,
