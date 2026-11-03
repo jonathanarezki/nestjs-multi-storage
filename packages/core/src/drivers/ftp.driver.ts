@@ -2,23 +2,19 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { PassThrough, Readable, Writable } from 'stream';
+import { StorageCreateWriteStreamOptions, StorageModuleOptions, StorageStats } from '../interfaces';
 import {
-  StorageCreateReadStreamOptions,
-  StorageCreateWriteStreamOptions,
-  StorageMkdirOptions,
-  StorageModuleOptions,
-  StorageReaddirOptions,
-  StorageReadFileOptions,
-  StorageRmdirOptions,
-  StorageRmOptions,
-  StorageStats,
-  StorageWriteFileOptions,
-} from '../interfaces';
-import { StorageDriver } from '../interfaces/storage-driver.interface';
-import { fsError, rmDirectoryError } from './fs-error';
+  DriverMkdirOptions,
+  DriverReaddirOptions,
+  DriverReadStreamOptions,
+  DriverRmdirOptions,
+  DriverRmOptions,
+  DriverWriteFileOptions,
+  StorageDriver,
+} from '../interfaces/storage-driver.interface';
+import { createFsError, createRmDirectoryError } from './fs-error';
 import { remotePath } from './remote-path';
-import { encodeNames, readdirOptions, readFileOptions, writeFileOptions } from './options';
-import { buildStats, defaultMode } from './stats';
+import { createStats, defaultMode } from './stats';
 
 type FtpClient = import('basic-ftp').Client;
 
@@ -82,10 +78,9 @@ export class FtpDriver implements StorageDriver {
     this.idle = [];
   }
 
-  /** Unlike `fs.promises.mkdir`, `recursive` defaults to `true`. The `mode` is ignored. */
-  async mkdir(folderPath: string, options?: StorageMkdirOptions): Promise<string | undefined> {
+  /** The `mode` is ignored. */
+  async mkdir(folderPath: string, { recursive }: DriverMkdirOptions): Promise<string | undefined> {
     const full = this.ftpPath(folderPath);
-    const recursive = options?.recursive ?? true;
 
     return this.run(async (client) => {
       if (!recursive) {
@@ -93,10 +88,10 @@ export class FtpDriver implements StorageDriver {
           await this.mkd(client, full);
         } catch (error) {
           if (!this.isReply(error)) throw error;
-          if (await this.lookup(client, full)) throw fsError('EEXIST', 'mkdir', full);
+          if (await this.lookup(client, full)) throw createFsError('EEXIST', 'mkdir', full);
           const parent = await this.lookup(client, path.posix.dirname(full));
-          if (!parent) throw fsError(await this.missingParentCode(client, full), 'mkdir', full);
-          if (!parent.isDirectory) throw fsError('ENOTDIR', 'mkdir', full);
+          if (!parent) throw createFsError(await this.missingParentCode(client, full), 'mkdir', full);
+          if (!parent.isDirectory) throw createFsError('ENOTDIR', 'mkdir', full);
           throw error;
         }
         return undefined;
@@ -107,7 +102,7 @@ export class FtpDriver implements StorageDriver {
       for (let current = full; ; current = path.posix.dirname(current)) {
         const found = await this.lookup(client, current);
         if (found) {
-          if (!found.isDirectory) throw fsError(current === full ? 'EEXIST' : 'ENOTDIR', 'mkdir', full);
+          if (!found.isDirectory) throw createFsError(current === full ? 'EEXIST' : 'ENOTDIR', 'mkdir', full);
           break;
         }
         missing.unshift(current);
@@ -124,48 +119,44 @@ export class FtpDriver implements StorageDriver {
     });
   }
 
-  async readdir(folderPath: string, options?: BufferEncoding | StorageReaddirOptions): Promise<string[]> {
+  async readdir(folderPath: string, { recursive }: DriverReaddirOptions): Promise<string[]> {
     const full = this.ftpPath(folderPath);
-    const opts = readdirOptions(options);
 
-    const names = await this.run(async (client) => {
+    return this.run(async (client) => {
       const found = await this.lookup(client, full);
-      if (!found) throw fsError('ENOENT', 'scandir', full);
-      if (!found.isDirectory) throw fsError('ENOTDIR', 'scandir', full);
+      if (!found) throw createFsError('ENOENT', 'scandir', full);
+      if (!found.isDirectory) throw createFsError('ENOTDIR', 'scandir', full);
 
       const names: string[] = [];
       const walk = async (folder: string, relative: string) => {
         for (const entry of await this.entries(client, folder)) {
           const name = path.posix.join(relative, entry.name);
           names.push(name);
-          if (opts.recursive && entry.isDirectory) await walk(path.posix.join(folder, entry.name), name);
+          if (recursive && entry.isDirectory) await walk(path.posix.join(folder, entry.name), name);
         }
       };
       await walk(full, '');
       return names;
     });
-    return encodeNames(names, opts.encoding);
   }
 
-  /** Unlike `fs.promises.rmdir`, `recursive` defaults to `true` (like `fs.promises.rm(path, { recursive: true })`). */
-  async rmdir(folderPath: string, options?: StorageRmdirOptions): Promise<void> {
+  async rmdir(folderPath: string, { recursive }: DriverRmdirOptions): Promise<void> {
     const full = this.ftpPath(folderPath);
-    const recursive = options?.recursive ?? true;
 
     return this.run(async (client) => {
       const found = await this.lookup(client, full);
       if (recursive) {
-        if (!found) throw fsError('ENOENT', 'lstat', full);
+        if (!found) throw createFsError('ENOENT', 'lstat', full);
         if (!found.isDirectory) return void (await client.remove(full));
         return this.removeTree(client, full);
       }
-      if (!found) throw fsError('ENOENT', 'rmdir', full);
-      if (!found.isDirectory) throw fsError('ENOTDIR', 'rmdir', full);
+      if (!found) throw createFsError('ENOENT', 'rmdir', full);
+      if (!found.isDirectory) throw createFsError('ENOTDIR', 'rmdir', full);
       try {
         await client.removeEmptyDir(full);
       } catch (error) {
         if (this.isReply(error) && (await this.entries(client, full)).length > 0) {
-          throw fsError('ENOTEMPTY', 'rmdir', full);
+          throw createFsError('ENOTEMPTY', 'rmdir', full);
         }
         throw error;
       }
@@ -176,27 +167,17 @@ export class FtpDriver implements StorageDriver {
     const full = this.ftpPath(p);
 
     const found = await this.run((client) => this.lookup(client, full));
-    if (!found) throw fsError('ENOENT', 'stat', full);
-    return buildStats({ mode: defaultMode(found.isDirectory), size: found.size, mtime: found.mtime });
+    if (!found) throw createFsError('ENOENT', 'stat', full);
+    return createStats({ mode: defaultMode(found.isDirectory), size: found.size, mtime: found.mtime });
   }
 
-  /**
-   * Unlike `fs.existsSync`, errors other than "not found" (login, network, ...) are thrown, not turned into `false`.
-   */
   async exists(p: string): Promise<boolean> {
     const full = this.ftpPath(p);
 
     return !!(await this.run((client) => this.lookup(client, full)));
   }
 
-  async readFile(
-    filePath: string,
-    options: BufferEncoding | (StorageReadFileOptions & { encoding: BufferEncoding }),
-  ): Promise<string>;
-  async readFile(filePath: string, options?: (StorageReadFileOptions & { encoding?: null }) | null): Promise<Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer> {
-    const { encoding } = readFileOptions(options).fsOptions;
+  async readFile(filePath: string): Promise<Buffer> {
     const full = this.ftpPath(filePath);
 
     // A retry starts from scratch
@@ -215,52 +196,37 @@ export class FtpDriver implements StorageDriver {
         throw await this.readError(client, error, full, true);
       }
     });
-    const data = Buffer.concat(chunks);
-    return encoding ? data.toString(encoding) : data;
+    return Buffer.concat(chunks);
   }
 
-  async writeFile(
-    filePath: string,
-    data: string | Buffer | Uint8Array,
-    options?: BufferEncoding | StorageWriteFileOptions,
-  ): Promise<void> {
-    const { encoding, flag } = writeFileOptions(options);
+  async writeFile(filePath: string, buffer: Buffer, { flag }: DriverWriteFileOptions): Promise<void> {
     const full = this.ftpPath(filePath);
 
-    const buffer = typeof data === 'string' ? Buffer.from(data, encoding) : Buffer.from(data);
     const append = !!flag?.startsWith('a');
     // Appending is not idempotent: it must not be retried on a new connection
     return this.run(async (client) => {
-      if (flag?.includes('x') && (await this.lookup(client, full))) throw fsError('EEXIST', 'open', full);
+      if (flag?.includes('x') && (await this.lookup(client, full))) throw createFsError('EEXIST', 'open', full);
       const source = Readable.from(buffer.length ? [buffer] : []);
       try {
         await (append ? client.appendFrom(source, full) : client.uploadFrom(source, full));
       } catch (error) {
-        throw await this.uploadError(client, error, full, (code) => fsError(code, 'open', full));
+        throw await this.uploadError(client, error, full, (code) => createFsError(code, 'open', full));
       }
     }, !append);
   }
 
-  async getSignedUrl(): Promise<string> {
-    throw new Error('Signed URLs are not supported for ftp storage.');
-  }
-
-  async getSignedPutUrl(): Promise<string> {
-    throw new Error('Signed URLs are not supported for ftp storage.');
-  }
-
-  async rm(filePath: string, options?: StorageRmOptions): Promise<void> {
+  async rm(filePath: string, options: DriverRmOptions): Promise<void> {
     const full = this.ftpPath(filePath);
 
     return this.run(async (client) => {
       const found = await this.lookup(client, full);
       if (!found) {
-        if (options?.force) return;
-        throw fsError('ENOENT', 'lstat', full);
+        if (options.force) return;
+        throw createFsError('ENOENT', 'lstat', full);
       }
       if (!found.isDirectory) return void (await client.remove(full));
-      if (!options?.recursive) {
-        throw rmDirectoryError(full);
+      if (!options.recursive) {
+        throw createRmDirectoryError(full);
       }
       return this.removeTree(client, full);
     });
@@ -275,10 +241,10 @@ export class FtpDriver implements StorageDriver {
 
     return this.run(async (client) => {
       const source = await this.lookup(client, from);
-      if (!source) throw fsError('ENOENT', 'copyfile', from, to);
+      if (!source) throw createFsError('ENOENT', 'copyfile', from, to);
       const target = await this.lookup(client, to);
-      if (source.isDirectory || target?.isDirectory) throw fsError('EISDIR', 'copyfile', from, to);
-      if (target && (mode ?? 0) & fs.constants.COPYFILE_EXCL) throw fsError('EEXIST', 'copyfile', from, to);
+      if (source.isDirectory || target?.isDirectory) throw createFsError('EISDIR', 'copyfile', from, to);
+      if (target && (mode ?? 0) & fs.constants.COPYFILE_EXCL) throw createFsError('EEXIST', 'copyfile', from, to);
       if (from === to) return;
 
       const folder = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'node-multi-storage-'));
@@ -288,7 +254,7 @@ export class FtpDriver implements StorageDriver {
         try {
           await client.uploadFrom(local, to);
         } catch (error) {
-          throw await this.uploadError(client, error, to, (code) => fsError(code, 'copyfile', from, to));
+          throw await this.uploadError(client, error, to, (code) => createFsError(code, 'copyfile', from, to));
         }
       } finally {
         await fs.promises.rm(folder, { recursive: true, force: true });
@@ -302,17 +268,17 @@ export class FtpDriver implements StorageDriver {
 
     return this.run(async (client) => {
       const source = await this.lookup(client, from);
-      if (!source) throw fsError('ENOENT', 'rename', from, to);
+      if (!source) throw createFsError('ENOENT', 'rename', from, to);
       const [fromDir, toDir] = [from.replace(/\/+$/, ''), to.replace(/\/+$/, '')];
       if (fromDir === toDir) return;
-      if (source.isDirectory && toDir.startsWith(`${fromDir}/`)) throw fsError('EINVAL', 'rename', from, to);
+      if (source.isDirectory && toDir.startsWith(`${fromDir}/`)) throw createFsError('EINVAL', 'rename', from, to);
 
       const target = await this.lookup(client, to);
       if (target) {
-        if (source.isDirectory && !target.isDirectory) throw fsError('ENOTDIR', 'rename', from, to);
-        if (!source.isDirectory && target.isDirectory) throw fsError('EISDIR', 'rename', from, to);
+        if (source.isDirectory && !target.isDirectory) throw createFsError('ENOTDIR', 'rename', from, to);
+        if (!source.isDirectory && target.isDirectory) throw createFsError('EISDIR', 'rename', from, to);
         if (target.isDirectory && (await this.entries(client, to)).length > 0) {
-          throw fsError('ENOTEMPTY', 'rename', from, to);
+          throw createFsError('ENOTEMPTY', 'rename', from, to);
         }
       }
       try {
@@ -325,25 +291,22 @@ export class FtpDriver implements StorageDriver {
           return void (await client.rename(from, to));
         }
         const parent = await this.lookup(client, path.posix.dirname(to));
-        if (!parent) throw fsError(await this.missingParentCode(client, to), 'rename', from, to);
-        if (!parent.isDirectory) throw fsError('ENOTDIR', 'rename', from, to);
+        if (!parent) throw createFsError(await this.missingParentCode(client, to), 'rename', from, to);
+        if (!parent.isDirectory) throw createFsError('ENOTDIR', 'rename', from, to);
         throw error;
       }
     }, false);
   }
 
   /** `start` is a REST offset, `end` is applied client-side: the connection is dropped once enough bytes arrived. */
-  createReadStream(filePath: string, options?: StorageCreateReadStreamOptions): Readable {
+  createReadStream(filePath: string, options: DriverReadStreamOptions): Readable {
     const full = this.ftpPath(filePath);
-    const start = options?.start ?? 0;
+    const start = options.start ?? 0;
 
-    const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
-    if (options?.encoding) {
-      pass.setEncoding(options.encoding);
-    }
+    const pass = new PassThrough({ highWaterMark: options.highWaterMark });
 
     let client: FtpClient | undefined;
-    let remaining = typeof options?.end === 'number' ? options.end - start + 1 : Infinity;
+    let remaining = typeof options.end === 'number' ? options.end - start + 1 : Infinity;
     let transferring = false;
     let truncated = false;
     const sink = new Writable({
@@ -397,11 +360,11 @@ export class FtpDriver implements StorageDriver {
     return pass;
   }
 
-  createWriteStream(filePath: string, options?: StorageCreateWriteStreamOptions): Writable {
+  createWriteStream(filePath: string, options: StorageCreateWriteStreamOptions): Writable {
     const full = this.ftpPath(filePath);
-    const append = !!options?.flags?.startsWith('a');
+    const append = !!options.flags?.startsWith('a');
 
-    const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
+    const pass = new PassThrough({ highWaterMark: options.highWaterMark });
     let client: FtpClient | undefined;
     let transferring = false;
 
@@ -416,7 +379,7 @@ export class FtpDriver implements StorageDriver {
           transferring = false;
         }
       } catch (error) {
-        throw await this.uploadError(acquired, error, full, (code) => fsError(code, 'open', full));
+        throw await this.uploadError(acquired, error, full, (code) => createFsError(code, 'open', full));
       } finally {
         this.release(acquired);
       }
@@ -424,8 +387,8 @@ export class FtpDriver implements StorageDriver {
 
     // 'finish' is only emitted once the upload has completed on the server, like fs.WriteStream after the flush
     const writable = new Writable({
-      highWaterMark: options?.highWaterMark,
-      defaultEncoding: options?.encoding,
+      highWaterMark: options.highWaterMark,
+      defaultEncoding: options.encoding,
       write(chunk, encoding, callback) {
         if (pass.write(chunk, encoding)) {
           callback();
@@ -582,9 +545,9 @@ export class FtpDriver implements StorageDriver {
     const found = await this.lookup(client, full);
     if (found?.isDirectory) {
       // Node's stream error for a folder carries no path
-      return fsError('EISDIR', 'read', withPath ? full : undefined);
+      return createFsError('EISDIR', 'read', withPath ? full : undefined);
     }
-    return found ? error : fsError('ENOENT', 'open', full);
+    return found ? error : createFsError('ENOENT', 'open', full);
   }
 
   /** A failed STOR / APPE: the target is a folder or its parent is missing or no folder. */

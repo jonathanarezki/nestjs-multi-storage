@@ -114,7 +114,7 @@ jobs:
         # Before the tests: one of them spawns a child process that needs dist
         run: npm run build
 
-      - name: Check API compatibility with 0.6.0
+      - name: Check the public API against the 0.8.0 baseline
         run: npm run check:api
 
       - name: Test (e2e, starts adobe/s3mock via Docker)

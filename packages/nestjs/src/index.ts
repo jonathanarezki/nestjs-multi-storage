@@ -1,10 +1,26 @@
 export * from './storage.module';
 export * from './storage.service';
 export * from './inject-storage.decorator';
-export { StorageDisk, isStorageError } from '@webbar/node-multi-storage';
+export {
+  StorageDisk,
+  createFsError,
+  createRmDirectoryError,
+  createStats,
+  isStorageError,
+} from '@webbar/node-multi-storage';
 export type {
-  StorageBucketOptions,
+  DriverMkdirOptions,
+  DriverReaddirOptions,
+  DriverReadFileOptions,
+  DriverReadStreamOptions,
+  DriverRmdirOptions,
+  DriverRmOptions,
+  DriverSignedPutUrlOptions,
+  DriverSignedUrlOptions,
+  DriverWriteFileOptions,
   StorageConfig,
+  StorageCustomDiskOptions,
+  StorageDriver,
   StorageCreateReadStreamOptions,
   StorageCreateWriteStreamOptions,
   StorageDiskOptions,

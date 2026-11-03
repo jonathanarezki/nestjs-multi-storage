@@ -81,14 +81,20 @@ describeS3('isStorageError (AWS SDK errors)', () => {
       expect(isStorageError(error)).toBe(false);
       expect(isStorageError(error, 'NoSuchBucket')).toBe(false);
 
-      const viaService: unknown = await ctx.service.readFile('a.txt', { bucket: 'no-such-bucket-xyz' }).then(
-        () => undefined,
-        (e: unknown) => e,
-      );
-      expect(viaService).toBeInstanceOf(Error);
-      expect(isStorageError(viaService)).toBe(false);
-    } finally {
       await ctx.close();
+      const missing = await createCtx(S3_BACKEND, 'nosuchbucket-disk', { overrides: { bucket: 'no-such-bucket-xyz' } });
+      try {
+        const viaService: unknown = await missing.service.readFile('a.txt').then(
+          () => undefined,
+          (e: unknown) => e,
+        );
+        expect(viaService).toBeInstanceOf(Error);
+        expect(isStorageError(viaService)).toBe(false);
+      } finally {
+        await missing.close();
+      }
+    } finally {
+      await ctx.close().catch(() => undefined);
     }
   });
 });

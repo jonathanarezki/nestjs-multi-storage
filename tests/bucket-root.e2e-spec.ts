@@ -187,12 +187,11 @@ describeS3('bucket root without a prefix (S3)', () => {
   });
 
   it('exists on the root is true for an existing bucket', async () => {
-    expect(await service.exists('', bucket)).toBe(true);
+    expect(await service.exists('')).toBe(true);
   });
 });
 
 describeS3('nonexistent bucket (S3)', () => {
-  const MISSING = { bucket: `e2e-missing-${randomUUID().slice(0, 12)}` };
   const noSuchBucket = { name: 'NoSuchBucket' };
 
   for (const [label, prefix] of [
@@ -200,28 +199,29 @@ describeS3('nonexistent bucket (S3)', () => {
     ['without a prefix', ''],
   ] as const) {
     it(`stat, exists, rm, readdir, rmdir, mkdir, copyFile, rename, readFile and streams reject with NoSuchBucket, ${label}`, async () => {
-      const ctx = await createCtx(S3_BACKEND, 'missing-bucket', { overrides: { prefix: prefix || undefined } });
+      const ctx = await createCtx(S3_BACKEND, 'missing-bucket', {
+        overrides: { prefix: prefix || undefined, bucket: `e2e-missing-${randomUUID().slice(0, 12)}` },
+      });
       try {
         const { service } = ctx;
         for (const p of ['a.txt', 'dir/a.txt', '']) {
-          await expect(service.stat(p, MISSING)).rejects.toMatchObject(noSuchBucket);
-          await expect(service.exists(p, MISSING.bucket)).rejects.toMatchObject(noSuchBucket);
-          await expect(service.rm(p, { ...MISSING, recursive: true })).rejects.toMatchObject(noSuchBucket);
-          await expect(service.rm(p, { ...MISSING, force: true })).rejects.toMatchObject(noSuchBucket);
-          await expect(service.readdir(p, MISSING)).rejects.toMatchObject(noSuchBucket);
-          await expect(service.readdir(p, { ...MISSING, recursive: true })).rejects.toMatchObject(noSuchBucket);
-          await expect(service.rmdir(p, MISSING)).rejects.toMatchObject(noSuchBucket);
-          await expect(service.rmdir(p, { ...MISSING, recursive: false })).rejects.toMatchObject(noSuchBucket);
-          await expect(service.mkdir(p, MISSING)).rejects.toMatchObject(noSuchBucket);
+          await expect(service.stat(p)).rejects.toMatchObject(noSuchBucket);
+          await expect(service.exists(p)).rejects.toMatchObject(noSuchBucket);
+          await expect(service.rm(p, { recursive: true })).rejects.toMatchObject(noSuchBucket);
+          await expect(service.rm(p, { force: true })).rejects.toMatchObject(noSuchBucket);
+          await expect(service.readdir(p)).rejects.toMatchObject(noSuchBucket);
+          await expect(service.readdir(p, { recursive: true })).rejects.toMatchObject(noSuchBucket);
+          await expect(service.rmdir(p)).rejects.toMatchObject(noSuchBucket);
+          await expect(service.rmdir(p, { recursive: false })).rejects.toMatchObject(noSuchBucket);
+          await expect(service.mkdir(p)).rejects.toMatchObject(noSuchBucket);
         }
-        await expect(service.copyFile('a.txt', 'b.txt', 0, MISSING.bucket)).rejects.toMatchObject(noSuchBucket);
-        await expect(service.rename('a.txt', 'b.txt', MISSING.bucket)).rejects.toMatchObject(noSuchBucket);
-        await expect(service.readFile('a.txt', MISSING)).rejects.toMatchObject(noSuchBucket);
-        await expect(collect(service.createReadStream('a.txt', MISSING))).rejects.toMatchObject(noSuchBucket);
+        await expect(service.copyFile('a.txt', 'b.txt', 0)).rejects.toMatchObject(noSuchBucket);
+        await expect(service.rename('a.txt', 'b.txt')).rejects.toMatchObject(noSuchBucket);
+        await expect(service.readFile('a.txt')).rejects.toMatchObject(noSuchBucket);
+        await expect(collect(service.createReadStream('a.txt'))).rejects.toMatchObject(noSuchBucket);
       } finally {
-        // Not ctx.close(): without a prefix its rmdir('') would empty the SHARED bucket, under other workers' feet.
-        // Nothing was written here, so closing the module is all the cleanup needed.
-        await ctx.moduleRef.close();
+        // The bucket does not exist: close()'s cleanup finds nothing (and cannot touch the shared bucket)
+        await ctx.close();
       }
     });
   }

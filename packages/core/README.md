@@ -10,7 +10,7 @@ It has no framework dependency (its only mandatory dependency is `mime-types`) a
 ## Features
 
 - `fs`-compatible API: `readFile`, `writeFile`, `readdir`, `stat`, `copyFile`, `rename`, `mkdir`, `rm`, `rmdir`, `exists`, `createReadStream`, `createWriteStream`.
-- Five backends: the local filesystem, AWS S3 or any S3-compatible provider (MinIO, Cloudflare R2, Hetzner, ...), an FTP or FTPS server (`ftp`, via `basic-ftp`), an SFTP server (`sftp`, via `ssh2`), and an in-memory store (`memory`, backed by `memfs`) for unit tests without disk, Docker or credentials. FTP and SFTP behave like the filesystem backend (real folders, the same Node-style errors), see [FTP and SFTP](#ftp-and-sftp).
+- Five built-in backends (plus [your own drivers](#custom-drivers-experimental)): the local filesystem, AWS S3 or any S3-compatible provider (MinIO, Cloudflare R2, Hetzner, ...), an FTP or FTPS server (`ftp`, via `basic-ftp`), an SFTP server (`sftp`, via `ssh2`), and an in-memory store (`memory`, backed by `memfs`) for unit tests without disk, Docker or credentials. FTP and SFTP behave like the filesystem backend (real folders, the same Node-style errors), see [FTP and SFTP](#ftp-and-sftp).
 - Multiple named disks: configure several stores (for example S3 plus SFTP plus local filesystem plus memory) with `createStorage({ default, disks })` and use them via the storage itself (the default disk) or `storage.disk('name')`. A single-store configuration is one disk.
 - Lazy initialisation: connections and clients are created on first use, so there is nothing to start before the first call, which suits serverless. See [Lifecycle](#lifecycle).
 - Streams, including range reads, and a write stream that emits `'finish'` only after the upload has completed.
@@ -148,20 +148,22 @@ See [Testing with the memory backend](#testing-with-the-memory-backend).
 
 `type` is the only option that is always required (`host` for ftp and sftp, and `hostKey` for sftp, on top of it). Unknown values of `type` fall back to the filesystem. With [multiple disks](#multiple-disks) the same options apply to each disk. The FTP and SFTP options are in their own table below.
 
-| Option                       | Type                                                  | Applies to | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ---------------------------- | ----------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                       | `'fileSystem' \| 's3' \| 'memory' \| 'ftp' \| 'sftp'` | all        | Selects the backend. `'memory'` needs the optional peer dependency `memfs`, `'ftp'` needs `basic-ftp` and `'sftp'` needs `ssh2`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `prefix`                     | `string`                                              | all        | Root of the storage. A directory on the filesystem, a key prefix on S3 (leading and trailing `/` or `\` are stripped), the remote base directory on FTP and SFTP (relative to the login directory when relative, `'.'` is the login directory; it must exist). Paths resolving outside it throw an `Error`. On the filesystem the directory must already exist: the library does not create it, and the first write fails with `ENOENT` otherwise. In memory mode it is a directory inside the in-memory volume (relative prefixes are resolved under `/`). Default: none (`/` in memory mode). |
-| `files`                      | `Record<string, string \| Buffer>`                    | memory     | Pre-populates the in-memory store. Keys are paths relative to `prefix` (parent folders are created, keys escaping the prefix throw), values are the file contents. Default: empty.                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `bucket`                     | `string`                                              | S3         | Default bucket. Can be overridden per call, see [per-call bucket](#per-call-bucket).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `region`                     | `string`                                              | S3         | AWS region. If omitted, the AWS SDK default resolution applies (`AWS_REGION`, shared config, ...).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `endpoint`                   | `string`                                              | S3         | Custom endpoint URL, for S3-compatible providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `forcePathStyle`             | `boolean`                                             | S3         | Use path-style addressing (`https://host/bucket/key`). Often required by MinIO and similar. Default: the SDK default.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `accessKeyId`                | `string`                                              | S3         | Access key. Credentials are used only when both `accessKeyId` and `secretAccessKey` are set; otherwise the AWS default credential chain is used (environment variables, IAM roles, `~/.aws`).                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `secretAccessKey`            | `string`                                              | S3         | Secret key. See `accessKeyId`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `endpointCDN`                | `string`                                              | S3         | CDN host that replaces `endpoint` in URLs. Used by `readFile` (which then downloads via the CDN) and by `getSignedUrl` / `getSignedPutUrl`. Only takes effect when `endpoint` is set as well; otherwise `readFile` reads directly from S3.                                                                                                                                                                                                                                                                                                                                                      |
-| `requestChecksumCalculation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'`                 | S3         | Passed to the S3 client. Default: `'WHEN_REQUIRED'` when `endpoint` is set (S3-compatible providers often reject the SDK's default CRC32 checksums), otherwise the SDK default. An explicit value always wins; set `'WHEN_SUPPORTED'` to opt back in to the SDK default on a custom endpoint.                                                                                                                                                                                                                                                                                                   |
-| `responseChecksumValidation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'`                 | S3         | Passed to the S3 client. Same defaults and purpose as above; the two options are defaulted independently.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Option                       | Type                                                              | Applies to | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------- | ----------------------------------------------------------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                       | `'fileSystem' \| 's3' \| 'memory' \| 'ftp' \| 'sftp' \| 'custom'` | all        | Selects the backend. `'memory'` needs the optional peer dependency `memfs`, `'ftp'` needs `basic-ftp` and `'sftp'` needs `ssh2`. `'custom'` uses your own driver, see [Custom drivers](#custom-drivers-experimental) (it only has `driver` and `wrap`, no other option).                                                                                                                                                                                                                                                                                                                        |
+| `prefix`                     | `string`                                                          | all        | Root of the storage. A directory on the filesystem, a key prefix on S3 (leading and trailing `/` or `\` are stripped), the remote base directory on FTP and SFTP (relative to the login directory when relative, `'.'` is the login directory; it must exist). Paths resolving outside it throw an `Error`. On the filesystem the directory must already exist: the library does not create it, and the first write fails with `ENOENT` otherwise. In memory mode it is a directory inside the in-memory volume (relative prefixes are resolved under `/`). Default: none (`/` in memory mode). |
+| `files`                      | `Record<string, string \| Buffer>`                                | memory     | Pre-populates the in-memory store. Keys are paths relative to `prefix` (parent folders are created, keys escaping the prefix throw), values are the file contents. Default: empty.                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `wrap`                       | `(inner: StorageDriver) => StorageDriver`                         | all        | Experimental. Called once, when the disk's driver is first used, with the built-in driver: the returned driver is what the disk uses (encryption, read-only access, logging, caching, ...). See [Wrapping a driver](#wrapping-a-driver).                                                                                                                                                                                                                                                                                                                                                        |
+| `driver`                     | `StorageDriver \| (() => StorageDriver)`                          | custom     | Experimental. Your driver, or a synchronous factory called lazily (on first use or by `init()`), at most once. Required. See [Custom drivers](#custom-drivers-experimental).                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `bucket`                     | `string`                                                          | S3         | The bucket of this disk (required). For another bucket, configure another disk, see [Several buckets](#several-buckets).                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `region`                     | `string`                                                          | S3         | AWS region. If omitted, the AWS SDK default resolution applies (`AWS_REGION`, shared config, ...).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `endpoint`                   | `string`                                                          | S3         | Custom endpoint URL, for S3-compatible providers.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `forcePathStyle`             | `boolean`                                                         | S3         | Use path-style addressing (`https://host/bucket/key`). Often required by MinIO and similar. Default: the SDK default.                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `accessKeyId`                | `string`                                                          | S3         | Access key. Credentials are used only when both `accessKeyId` and `secretAccessKey` are set; otherwise the AWS default credential chain is used (environment variables, IAM roles, `~/.aws`).                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `secretAccessKey`            | `string`                                                          | S3         | Secret key. See `accessKeyId`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `endpointCDN`                | `string`                                                          | S3         | CDN host that replaces `endpoint` in URLs. Used by `readFile` (which then downloads via the CDN) and by `getSignedUrl` / `getSignedPutUrl`. Only takes effect when `endpoint` is set as well; otherwise `readFile` reads directly from S3.                                                                                                                                                                                                                                                                                                                                                      |
+| `requestChecksumCalculation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'`                             | S3         | Passed to the S3 client. Default: `'WHEN_REQUIRED'` when `endpoint` is set (S3-compatible providers often reject the SDK's default CRC32 checksums), otherwise the SDK default. An explicit value always wins; set `'WHEN_SUPPORTED'` to opt back in to the SDK default on a custom endpoint.                                                                                                                                                                                                                                                                                                   |
+| `responseChecksumValidation` | `'WHEN_SUPPORTED' \| 'WHEN_REQUIRED'`                             | S3         | Passed to the S3 client. Same defaults and purpose as above; the two options are defaulted independently.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 FTP and SFTP options (`host` is required for both; `hostKey` is required for sftp):
 
@@ -178,7 +180,7 @@ FTP and SFTP options (`host` is required for both; `hostKey` is required for sft
 | `passphrase`     | `string`                | sftp       | Passphrase of an encrypted `privateKey`.                                                                                                                                                                      |
 | `hostKey`        | `string \| false`       | sftp       | Required. The server's host key fingerprint, `SHA256:<base64>`, or `false` to skip the verification (insecure). See [The SFTP host key](#the-sftp-host-key).                                                  |
 
-The S3 client (one per S3 disk) is created on first use (or by the optional `init()`) and closed by `destroy()`, see [Lifecycle](#lifecycle). With no `bucket` (and none passed per call), S3 calls throw `No bucket configured: pass a bucket or set the bucket option`.
+The S3 client (one per S3 disk) is created on first use (or by the optional `init()`) and closed by `destroy()`, see [Lifecycle](#lifecycle). An S3 disk without `bucket` throws `type 's3' requires "bucket"` when it is created.
 
 Paths are always relative to `prefix`. With a prefix set, `'../x'` throws in all modes. Without a prefix, the filesystem backend uses paths as given (relative to the working directory) and the S3 backend uses them as keys; there, a path escaping the bucket root (`'../x'`, also `'/../x'`) throws.
 
@@ -223,7 +225,20 @@ Every disk is a `StorageDisk`, which has the complete file API described in the 
 
 ### Several buckets
 
-The [per-call `bucket`](#per-call-bucket) parameter is supported. Separate disks are the cleaner way to use several buckets (each can have its own prefix, endpoint and credentials).
+Use one disk per bucket: a disk has exactly one bucket (the `bucket` option), and each disk can have its own prefix, endpoint and credentials. The methods take no per-call `bucket` (it was removed in 0.8.0).
+
+```ts
+const storage = createStorage({
+  default: 'uploads',
+  disks: {
+    uploads: { type: 's3', bucket: 'my-uploads', region: 'eu-west-1' },
+    exports: { type: 's3', bucket: 'my-exports', region: 'eu-west-1' },
+  },
+});
+
+await storage.writeFile('a.txt', 'hello'); // my-uploads
+await storage.disk('exports').writeFile('a.txt', 'hello'); // my-exports
+```
 
 ### Copying between disks
 
@@ -243,6 +258,234 @@ await storage.disk('tmp').rm('upload.bin');
 
 On `fileSystem` and `memory` destinations the target folder must exist (`await disk.mkdir('files')`), as with `fs`; on S3 folders are implicit.
 
+## Custom drivers (experimental)
+
+> **Experimental.** The `StorageDriver` interface, the `custom` disk type, `wrap` and the helpers below are experimental in 0.8.x and may change in a minor release.
+
+A disk is backed by a driver. Besides the built-in ones you can plug in your own (WebDAV, Google Cloud Storage, a database, an in-process store, ...) with the `custom` type. `StorageDisk` keeps the whole fs-compatible API and does the work that does not depend on the backend, so a driver only deals with plain values.
+
+```ts
+import { createStorage } from '@webbar/node-multi-storage';
+
+const storage = createStorage({ type: 'custom', driver: myDriver });
+
+// or lazily: the factory is called on first use (or by init()), at most once
+const lazy = createStorage({ type: 'custom', driver: () => new MyDriver(process.env.MY_URL!) });
+
+// in a multi-disk configuration
+const several = createStorage({
+  default: 'local',
+  disks: { local: { type: 'fileSystem', prefix: './data' }, mine: { type: 'custom', driver: () => new MyDriver() } },
+});
+```
+
+`createStorage` rejects a `driver` that is neither an object nor a function (`Storage disk "mine": type 'custom' needs "driver": ...` in a multi-disk configuration). A driver given as an instance is checked for the required methods right away, so a missing one fails at `createStorage` time and is named; the result of a factory (and of `wrap`) is checked when it is created, on first use. A custom disk has no `prefix` or other options: the driver owns its configuration.
+
+### The driver interface
+
+| Method                                                     | Required | Description                                                                                              |
+| ---------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
+| `mkdir(path, { recursive, mode? })`                        | yes      | Returns the first folder created, or `undefined`.                                                        |
+| `readdir(path, { recursive })`                             | yes      | The entry names (UTF-8), relative to `path`, in any order (the disk sorts them).                         |
+| `rmdir(path, { recursive })`                               | yes      |                                                                                                          |
+| `stat(path)`                                               | yes      | A `StorageStats`: build it with `createStats`.                                                           |
+| `exists(path)`                                             | yes      | Only "not found" is `false`; other failures are thrown.                                                  |
+| `readFile(path, { flag? })`                                | yes      | A `Buffer`.                                                                                              |
+| `writeFile(path, data, { mode?, flag?, contentType? })`    | yes      | `data` is a `Buffer`.                                                                                    |
+| `rm(path, { force, recursive })`                           | yes      |                                                                                                          |
+| `copyFile(src, dest, mode)`                                | yes      | `mode` is the bit field of `fs.copyFile` (`COPYFILE_EXCL`).                                              |
+| `rename(oldPath, newPath)`                                 | yes      |                                                                                                          |
+| `init()`, `destroy()`                                      | no       | Called by `storage.init()` / `storage.destroy()` if present. The driver must also work without `init()`. |
+| `getSignedUrl(path, opts)`, `getSignedPutUrl(path, opts)`  | no       | Without them, `StorageDisk` throws `ERR_STORAGE_NOT_SUPPORTED`.                                          |
+| `createReadStream(path, { start?, end?, highWaterMark? })` | no       | Without it, `StorageDisk` streams the result of `readFile`.                                              |
+| `createWriteStream(path, options)`                         | no       | Without it, `StorageDisk` buffers the chunks and calls `writeFile` when the stream ends.                 |
+
+The contract:
+
+- **Normalized input.** `StorageDisk` applies defaults and shorthands first, so the driver gets plain option objects (`recursive` and `force` are always booleans), `Buffer`s (never strings or `Uint8Array`s) and returns `Buffer`s; encodings are applied by `StorageDisk`. Names are UTF-8. `start <= end` is already checked.
+- **Order is the disk's.** `readdir` may return names in any order; `StorageDisk` sorts them (plain code-unit order of the UTF-8 names) before applying the encoding, so every disk returns sorted results.
+- **Paths are yours.** The path is passed as the caller gave it. Resolving it (a prefix, `..`, leading slashes) and rejecting paths that escape your root is the driver's job.
+- **Node-style errors.** Failures are errors with a string `code`, like those of `fs.promises` (`ENOENT`, `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL`, `EACCES`, and `ERR_FS_EISDIR` for `rm` on a folder without `recursive`), so that `isStorageError` and code written against `fs` keep working. Build them with `createFsError(code, syscall, path?, dest?)` and `createRmDirectoryError(path)`. The per-method codes are documented in the JSDoc of `StorageDriver`.
+- **Streams report failures as `'error'` events**, not thrown exceptions (only a bad argument throws synchronously).
+
+### An example driver
+
+A complete driver on a `Map` (no streams and no signed URLs: the fallbacks and the "not supported" error apply):
+
+```ts
+import * as fs from 'fs';
+import { createFsError, createStats, createStorage, StorageDriver } from '@webbar/node-multi-storage';
+
+function mapDriver(): StorageDriver {
+  const files = new Map<string, Buffer>();
+  const dirs = new Set<string>(['']);
+  const kind = (p: string) => (files.has(p) ? 'file' : dirs.has(p) ? 'dir' : undefined);
+  return {
+    async mkdir(p) {
+      dirs.add(p);
+      return undefined;
+    },
+    async readdir(p) {
+      return [...files.keys()].filter((k) => k.startsWith(p ? `${p}/` : '')).map((k) => k.slice(p ? p.length + 1 : 0));
+    },
+    async rmdir(p) {
+      dirs.delete(p);
+    },
+    async stat(p) {
+      const found = kind(p);
+      if (!found) throw createFsError('ENOENT', 'stat', p);
+      return createStats({
+        mode: (found === 'file' ? fs.constants.S_IFREG : fs.constants.S_IFDIR) | 0o644,
+        size: files.get(p)?.length ?? 0,
+        mtime: new Date(),
+      });
+    },
+    async exists(p) {
+      return kind(p) !== undefined;
+    },
+    async readFile(p) {
+      if (kind(p) === 'dir') throw createFsError('EISDIR', 'read', p);
+      const data = files.get(p);
+      if (!data) throw createFsError('ENOENT', 'open', p);
+      return data;
+    },
+    async writeFile(p, data) {
+      files.set(p, data);
+    },
+    async rm(p, { force }) {
+      if (!files.delete(p) && !force) throw createFsError('ENOENT', 'rm', p);
+    },
+    async copyFile(src, dest) {
+      files.set(dest, await this.readFile(src, {}));
+    },
+    async rename(from, to) {
+      files.set(to, await this.readFile(from, {}));
+      files.delete(from);
+    },
+  };
+}
+
+const storage = createStorage({ type: 'custom', driver: mapDriver });
+await storage.writeFile('a.txt', 'hello');
+```
+
+### Fallbacks and their cost
+
+- **`createReadStream`** (missing): a `Readable` that calls `readFile` as soon as it is created, applies `start` / `end` (inclusive, like `fs`) and `highWaterMark`, and emits `ENOENT`, `EISDIR` and the other errors as `'error'`. `encoding` is applied by `StorageDisk` as for every driver.
+- **`createWriteStream`** (missing): a `Writable` that **buffers all chunks in memory** and calls `writeFile` (with `contentType`) when the stream ends; `'finish'` is emitted once it has completed and a failure is emitted as `'error'`. String chunks are decoded with `encoding`. A stream destroyed before its end writes nothing.
+
+Both fallbacks hold the whole file in memory: implement the stream methods in the driver for large files.
+
+### Wrapping a driver
+
+`wrap` is an option of every disk type. It is called once, when the driver is created (on first use or by `init()`), with the driver of the disk (the built-in one, or your custom driver) and returns the driver the disk uses instead. The result goes through the same required-methods check. Use it for encryption, read-only access, logging or caching on top of any backend. A wrapper has to forward every method it does not change. `init` and `destroy` follow one rule: if the wrapper defines the method it is called (and is responsible for forwarding to `inner`); if it does not, the method of the inner driver is called, so a wrapper that leaves them out does not leak the S3 client or the FTP / SFTP connections. `destroy()` still never creates a driver or a wrapper that was not used. Do not spread a class instance (`{ ...inner }` loses its prototype methods): bind or delegate the methods. To make `StorageDisk` use its stream fallbacks (so that the streams go through your `readFile` / `writeFile`), leave `createReadStream` and `createWriteStream` out of the wrapper.
+
+```ts
+import { createFsError, StorageDriver } from '@webbar/node-multi-storage';
+
+// A read-only disk: reads and listings pass through, everything that changes something is EACCES
+const readOnly = (inner: StorageDriver): StorageDriver => {
+  const denied = (path: string) => createFsError('EACCES', 'open', path);
+  return {
+    readdir: (p, o) => inner.readdir(p, o),
+    stat: (p) => inner.stat(p),
+    exists: (p) => inner.exists(p),
+    readFile: (p, o) => inner.readFile(p, o),
+    createReadStream: inner.createReadStream?.bind(inner),
+    mkdir: async (p) => Promise.reject(denied(p)),
+    rmdir: async (p) => Promise.reject(denied(p)),
+    writeFile: async (p) => Promise.reject(denied(p)),
+    rm: async (p) => Promise.reject(denied(p)),
+    copyFile: async (_src, dest) => Promise.reject(denied(dest)),
+    rename: async (_from, to) => Promise.reject(denied(to)),
+  };
+};
+
+const storage = createStorage({ type: 's3', bucket: 'backups', wrap: readOnly });
+await storage.readFile('2026/db.dump'); // works
+await storage.writeFile('x', 'y'); // rejects with EACCES
+```
+
+`storage.s3client` still returns the S3 client of a wrapped S3 disk. A logging wrapper that forwards every method is the same shape: call `inner.method(...)` after logging.
+
+### Testing a custom driver
+
+The package ships its fs-behaviour suite for driver authors, as the subpath `@webbar/node-multi-storage/testing`. It runs the behaviour that all five built-in drivers share (the Node-style results and errors listed above) against your driver, through `createStorage({ type: 'custom', driver })`, so the argument normalization and the stream fallbacks are covered too. It uses `node:assert/strict` and has no dependency on a test framework: `describe`, `it`, `beforeEach` and `afterEach` default to the globals of Jest, Vitest (with `globals: true`) and Mocha.
+
+```ts
+// my-driver.spec.ts (Jest, or Vitest with globals: true, or Mocha)
+import { describeStorageDriver } from '@webbar/node-multi-storage/testing';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { MyDriver } from './my-driver';
+
+describeStorageDriver('MyDriver', {
+  create: async () => new MyDriver({ root: await mkdtemp('/tmp/my-driver-') }),
+  cleanup: async (driver) => rm((driver as MyDriver).root, { recursive: true, force: true }),
+  skip: ['rename-folder'], // optional: groups your backend cannot satisfy
+});
+```
+
+Vitest without globals (and `node:test`) take the test functions explicitly:
+
+```ts
+import { afterEach, beforeEach, describe, it } from 'vitest'; // or 'node:test'
+import { describeStorageDriver } from '@webbar/node-multi-storage/testing';
+
+describeStorageDriver('MyDriver', {
+  create: () => new MyDriver(),
+  test: { describe, it, beforeEach, afterEach },
+});
+```
+
+Options:
+
+```ts
+interface DescribeStorageDriverOptions {
+  create: () => StorageDriver | Promise<StorageDriver>;
+  cleanup?: (driver: StorageDriver) => Promise<void> | void;
+  skip?: string[]; // group names, see below; an unknown name throws
+  test?: Partial<{
+    describe: (name: string, fn: () => void) => unknown;
+    it: (name: string, fn: () => any) => unknown;
+    beforeEach: (fn: () => any) => unknown;
+    afterEach: (fn: () => any) => unknown;
+  }>;
+}
+```
+
+**Every test needs a fresh, empty store.** `create` is called before each test and must return a driver on a new empty store (a new temporary folder, key prefix, database or in-memory instance): the suite does not clean up by itself, and the tests assume that the root `''` is an empty folder that exists. `cleanup(driver)` runs after the test (delete the temporary folder, drop the database, ...); the disk is destroyed afterwards, which calls `driver.destroy()` if you have one. Folders behave like on a real filesystem in the suite (a file is written into an existing folder, so the tests create the parent first): a backend with implicit folders, like S3, also passes.
+
+`skip` takes the names of the groups below, each a `describe` block of the same name. `STORAGE_DRIVER_TEST_GROUPS` exports the list.
+
+| Group           | What it checks                                                                                        |
+| --------------- | ----------------------------------------------------------------------------------------------------- |
+| `root`          | the root `''` is an existing, empty folder                                                            |
+| `mkdir`         | recursive by default, `EEXIST`, `ENOENT`, `ENOTDIR`                                                   |
+| `readdir`       | listing, sorted listing, recursive listing with the ancestors, encodings, `ENOENT`, `ENOTDIR`         |
+| `readFile`      | `readFile` / `writeFile`: encodings, Buffers, `Uint8Array`, overwriting, `ENOENT`, `EISDIR`           |
+| `stat`          | files, folders, the `fs.Stats` shape, `ENOENT`                                                        |
+| `exists`        | files, folders (also implicit ones), missing paths                                                    |
+| `rm`            | recursive, `force`, `ERR_FS_EISDIR`, `ENOENT`                                                         |
+| `rmdir`         | recursive by default, `ENOTEMPTY`, `ENOTDIR`, `ENOENT`                                                |
+| `copyFile`      | overwriting, `COPYFILE_EXCL`, `ENOENT`, `EISDIR`, copying onto itself                                 |
+| `rename`        | files: overwriting, onto itself, `EISDIR`, `ENOENT`                                                   |
+| `rename-folder` | folders: nested content, `EINVAL`, `ENOTEMPTY`, `ENOTDIR`, onto an empty folder                       |
+| `streams`       | `createReadStream` (range, encoding, errors) and `createWriteStream` (also the fallbacks of the disk) |
+
+Not part of the suite, because the built-in drivers differ there: writing below a file or into a missing folder (S3 allows both), writing over a folder, the `flag` option of `writeFile`, content types, signed URLs and timestamps. Test those yourself. The suite is experimental like the rest of the interface and may grow between minor releases.
+
+### Exported helpers
+
+All experimental, like the interface:
+
+| Export                                                   | Description                                                                                                                                                                                                                       |
+| -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `StorageDriver`, `Driver*Options`                        | The interface and the option types of its methods (`DriverMkdirOptions`, `DriverReadFileOptions`, ...).                                                                                                                           |
+| `StorageCustomDiskOptions`                               | The configuration type of a `custom` disk.                                                                                                                                                                                        |
+| `createFsError(code, syscall, path?, dest?)`             | The Node-style error `fs` throws (`code`, `errno`, `syscall`, `path`, `dest` and a message like `ENOENT: no such file or directory, open '/a'`). Codes: `ENOENT`, `EACCES`, `EEXIST`, `ENOTDIR`, `EISDIR`, `EINVAL`, `ENOTEMPTY`. |
+| `createRmDirectoryError(path)`                           | What `fs.rm` throws for a folder without `recursive` (`ERR_FS_EISDIR`).                                                                                                                                                           |
+| `createStats({ mode, size, mtime, atime?, uid?, gid? })` | Builds a `StorageStats`; the `isFile()` / `isDirectory()` ... predicates come from the type bits of `mode` (`fs.constants.S_IFREG \| 0o644`).                                                                                     |
+
 ## Lifecycle
 
 **No initialisation is needed.** Every driver connects or creates its client on first use: an S3 client is created by the first operation, FTP and SFTP connections are opened by the first operation, and the filesystem and memory backends have nothing to set up. `createStorage` itself does no I/O. `await storage.init()` is an optional warm-up of all disks: it creates the S3 clients eagerly (FTP and SFTP connect on first use either way, so it neither connects nor checks credentials).
@@ -255,6 +498,8 @@ process.once('SIGTERM', async () => {
   process.exit(0);
 });
 ```
+
+A custom driver, or the `wrap` function of a disk, is created on first use or by `init()`; `destroy()` never creates one that was not used. `init()` and `destroy()` of the driver are called if it has them; for a wrapped disk, those of the wrapper if it has them, else those of the driver it wraps.
 
 **After `destroy()` the storage stays usable.** S3, FTP and SFTP reconnect on the next operation (a new S3 client, new connections), so `destroy()` can be called after every unit of work in a serverless function without breaking the next one. `destroy()` rejects callers that were waiting for a free FTP connection with `The ftp storage has been destroyed`; operations started afterwards work. `storage.s3client` is `undefined` until the client has been created (by `init()` or the first operation) and again after `destroy()`.
 
@@ -362,25 +607,25 @@ For NestJS there is [`nestjs-multi-storage`](https://www.npmjs.com/package/nestj
 
 ## API reference
 
-The file methods below exist on `Storage` (the default disk) and, identically, on every `StorageDisk` (`storage.disk('name')`). Parameters mirror `fs.promises`. Where `fs` has an options parameter, the S3 `bucket` is a key of that options object; where it has none (`exists`, `rename`, `copyFile`), `bucket` is an extra trailing parameter. A plain string in an options position is an encoding, as in `fs`. In filesystem mode `bucket` (and the S3-only options) are ignored.
+The file methods below exist on `Storage` (the default disk) and, identically, on every `StorageDisk` (`storage.disk('name')`). Parameters mirror `fs.promises`. A plain string in an options position is an encoding, as in `fs`. The S3-only options are ignored by the other backends.
 
-| Method                                                                                                                 | Returns                                                  | S3 notes                                                                                                                                                                     |
-| ---------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `mkdir(path, { recursive?, mode?, bucket? }?)`                                                                         | `Promise<string \| undefined>`                           | `recursive` defaults to `true` (unlike `fs`). Writes a `folder/` marker. `EEXIST` for a file; with `recursive: false` also for a folder, `ENOENT` for a missing parent.      |
-| `readdir(path, encoding \| { recursive?, encoding?, bucket? }?)`                                                       | `Promise<string[]>`                                      | Sorted. `ENOENT` for a missing folder, `ENOTDIR` for a file. `withFileTypes` is not supported.                                                                               |
-| `rmdir(path, { recursive?, bucket? }?)`                                                                                | `Promise<void>`                                          | `recursive` defaults to `true` (like `fs.rm(path, { recursive: true })`). Deletes in batches of 1000. `ENOENT` if missing; `recursive: false` gives `ENOTEMPTY` / `ENOTDIR`. |
-| `rm(path, { force?, recursive?, bucket? }?)`                                                                           | `Promise<void>`                                          | `ENOENT` unless `force`. A folder needs `recursive`, else `ERR_FS_EISDIR`.                                                                                                   |
-| `stat(path, { bucket? }?)`                                                                                             | `Promise<StorageStats>`                                  | Synthesized fields; adds `contentType` and `etag`. Throws `ENOENT`.                                                                                                          |
-| `exists(path, bucket?)`                                                                                                | `Promise<boolean>`                                       | `true` for an object, a marker or an implicit folder. Throws on errors other than "not found".                                                                               |
-| `readFile(path, encoding \| { encoding?, flag?, bucket? }?)`                                                           | `Promise<Buffer>`, or `Promise<string>` with an encoding | `ENOENT` for a missing key, `EISDIR` for a folder. Via `endpointCDN` if both it and `endpoint` are set. `flag` is ignored.                                                   |
-| `writeFile(path, data, encoding \| { encoding?, mode?, flag?, bucket?, contentType? }?)`                               | `Promise<void>`                                          | `data` is `string \| Buffer \| Uint8Array`. Content type is `contentType`, else looked up from the file name. `mode` and `flag` are ignored.                                 |
-| `copyFile(src, dest, mode?, bucket?)`                                                                                  | `Promise<void>`                                          | `CopyObject`, multipart copy above 5 GiB. Supports `COPYFILE_EXCL` (also for `src === dest`).                                                                                |
-| `rename(oldPath, newPath, bucket?)`                                                                                    | `Promise<void>`                                          | Copy then delete; works on files and folders.                                                                                                                                |
-| `createReadStream(path, { start?, end?, highWaterMark?, encoding?, bucket? }?)`                                        | `Readable`                                               | Ranged `GetObject`; `start` and `end` are inclusive. A missing key emits `ENOENT`, a folder `EISDIR`, as `'error'`.                                                          |
-| `createWriteStream(path, { highWaterMark?, encoding?, flags?, mode?, partSize?, queueSize?, contentType?, bucket? }?)` | `Writable`                                               | Multipart upload. `flags` and `mode` are ignored; `partSize`, `queueSize` and `contentType` are S3 only.                                                                     |
-| `getSignedUrl(path, opts?)`                                                                                            | `Promise<string>`                                        | S3 only. Throws in every other mode (filesystem, memory, ftp, sftp). `opts.bucket`.                                                                                          |
-| `getSignedPutUrl(path, opts?)`                                                                                         | `Promise<string>`                                        | S3 only. Throws in every other mode (filesystem, memory, ftp, sftp). `opts.bucket`.                                                                                          |
-| `s3client`                                                                                                             | `S3Client \| undefined`                                  | Getter. `undefined` in filesystem and memory mode.                                                                                                                           |
+| Method                                                                                                        | Returns                                                  | S3 notes                                                                                                                                                                     |
+| ------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mkdir(path, { recursive?, mode? }?)`                                                                         | `Promise<string \| undefined>`                           | `recursive` defaults to `true` (unlike `fs`). Writes a `folder/` marker. `EEXIST` for a file; with `recursive: false` also for a folder, `ENOENT` for a missing parent.      |
+| `readdir(path, encoding \| { recursive?, encoding? }?)`                                                       | `Promise<string[]>`                                      | Sorted. `ENOENT` for a missing folder, `ENOTDIR` for a file. `withFileTypes` is not supported.                                                                               |
+| `rmdir(path, { recursive? }?)`                                                                                | `Promise<void>`                                          | `recursive` defaults to `true` (like `fs.rm(path, { recursive: true })`). Deletes in batches of 1000. `ENOENT` if missing; `recursive: false` gives `ENOTEMPTY` / `ENOTDIR`. |
+| `rm(path, { force?, recursive? }?)`                                                                           | `Promise<void>`                                          | `ENOENT` unless `force`. A folder needs `recursive`, else `ERR_FS_EISDIR`.                                                                                                   |
+| `stat(path)`                                                                                                  | `Promise<StorageStats>`                                  | Synthesized fields; adds `contentType` and `etag`. Throws `ENOENT`.                                                                                                          |
+| `exists(path)`                                                                                                | `Promise<boolean>`                                       | `true` for an object, a marker or an implicit folder. Throws on errors other than "not found".                                                                               |
+| `readFile(path, encoding \| { encoding?, flag? }?)`                                                           | `Promise<Buffer>`, or `Promise<string>` with an encoding | `ENOENT` for a missing key, `EISDIR` for a folder. Via `endpointCDN` if both it and `endpoint` are set. `flag` is ignored.                                                   |
+| `writeFile(path, data, encoding \| { encoding?, mode?, flag?, contentType? }?)`                               | `Promise<void>`                                          | `data` is `string \| Buffer \| Uint8Array`. Content type is `contentType`, else looked up from the file name. `mode` and `flag` are ignored.                                 |
+| `copyFile(src, dest, mode?)`                                                                                  | `Promise<void>`                                          | `CopyObject`, multipart copy above 5 GiB. Supports `COPYFILE_EXCL` (also for `src === dest`).                                                                                |
+| `rename(oldPath, newPath)`                                                                                    | `Promise<void>`                                          | Copy then delete; works on files and folders.                                                                                                                                |
+| `createReadStream(path, { start?, end?, highWaterMark?, encoding? }?)`                                        | `Readable`                                               | Ranged `GetObject`; `start` and `end` are inclusive. A missing key emits `ENOENT`, a folder `EISDIR`, as `'error'`.                                                          |
+| `createWriteStream(path, { highWaterMark?, encoding?, flags?, mode?, partSize?, queueSize?, contentType? }?)` | `Writable`                                               | Multipart upload. `flags` and `mode` are ignored; `partSize`, `queueSize` and `contentType` are S3 only.                                                                     |
+| `getSignedUrl(path, opts?)`                                                                                   | `Promise<string>`                                        | S3 only. Throws `ERR_STORAGE_NOT_SUPPORTED` in every other mode.                                                                                                             |
+| `getSignedPutUrl(path, opts?)`                                                                                | `Promise<string>`                                        | S3 only. Throws `ERR_STORAGE_NOT_SUPPORTED` in every other mode.                                                                                                             |
+| `s3client`                                                                                                    | `S3Client \| undefined`                                  | Getter. `undefined` in filesystem and memory mode.                                                                                                                           |
 
 `mkdir` resolves to the first directory created on the filesystem (as `fs` does) and to `undefined` on S3.
 
@@ -418,12 +663,9 @@ const names = await storage.readdir('reports');
 
 // All descendants, as paths relative to the folder
 const all = await storage.readdir('reports', { recursive: true });
-
-// A bucket other than the default (a plain string would be an encoding)
-await storage.readdir('reports', { recursive: true, bucket: 'other-bucket' });
 ```
 
-On S3 the recursive result includes every ancestor folder of each object (`'2024'`, `'2024/jan'`, `'2024/jan/a.csv'`), like Node's recursive `readdir`. Results are de-duplicated and sorted, and listing errors are thrown. A missing folder throws `ENOENT` and a file `ENOTDIR`; an existing empty folder and the root give `[]`. Without a `prefix` the root (`''`, `'.'`) is the whole bucket. A nonexistent bucket rejects with the SDK's `NoSuchBucket` error (in every method), not `ENOENT`.
+On S3 the recursive result includes every ancestor folder of each object (`'2024'`, `'2024/jan'`, `'2024/jan/a.csv'`), like Node's recursive `readdir`. Results are de-duplicated, and listing errors are thrown. A missing folder throws `ENOENT` and a file `ENOTDIR`; an existing empty folder and the root give `[]`. Without a `prefix` the root (`''`, `'.'`) is the whole bucket. A nonexistent bucket rejects with the SDK's `NoSuchBucket` error (in every method), not `ENOENT`.
 
 ### stat and StorageStats
 
@@ -458,7 +700,7 @@ await storage.copyFile('a.txt', 'b.txt');
 await storage.copyFile('a.txt', 'b.txt', constants.COPYFILE_EXCL);
 ```
 
-Signature is `copyFile(src, dest, mode?, bucket?)`. On S3 the source must be a file (a folder throws `EISDIR`, a missing path `ENOENT`), content type and metadata are preserved, and copying a file onto itself is a no-op. Copying onto an existing folder throws `EISDIR`.
+On S3 the source must be a file (a folder throws `EISDIR`, a missing path `ENOENT`), content type and metadata are preserved, and copying a file onto itself is a no-op. Copying onto an existing folder throws `EISDIR`.
 
 ### rename and moving
 
@@ -492,19 +734,17 @@ On S3:
 - `createReadStream` returns immediately; request errors are emitted as `'error'` on the stream (a missing key as `ENOENT`). `encoding` calls `setEncoding` on the stream. Omitting `end` reads to the end of the object.
 - `createWriteStream` performs a multipart upload. `'finish'` is emitted once, after the upload has completed, so awaiting `pipeline` (or a `'finish'` listener) means the object exists. Upload failures are emitted as `'error'`, and destroying the stream aborts the upload.
 - `options.partSize` is at least 5 MiB (the default); `options.queueSize` defaults to 4. If `contentType` is not given it is looked up from the file name.
-- A missing bucket makes both methods throw synchronously.
 - Paths outside `prefix` (or the bucket root) make both methods throw synchronously.
 
 ### Signed URLs
 
-S3 only; both throw in every other mode (filesystem, memory, ftp, sftp). `expiresIn` is in seconds and defaults to 60. If `endpointCDN` and `endpoint` are both set, the host in the URL is replaced by the CDN host.
+S3 only; both throw in every other mode (filesystem, memory, ftp, sftp) and on any custom disk whose driver does not implement them: a typed error with the code `ERR_STORAGE_NOT_SUPPORTED` (`isStorageError(error, 'ERR_STORAGE_NOT_SUPPORTED')`) and the message `getSignedUrl is not supported by this disk`. `expiresIn` is in seconds and defaults to 60. If `endpointCDN` and `endpoint` are both set, the host in the URL is replaced by the CDN host.
 
 ```ts
 const downloadUrl = await storage.getSignedUrl('reports/a.csv', {
   expiresIn: 300,
   responseContentDisposition: 'attachment; filename="report.csv"',
   responseContentType: 'text/csv',
-  bucket: 'other-bucket', // optional
 });
 
 const uploadUrl = await storage.getSignedPutUrl('uploads/photo.jpg', {
@@ -529,20 +769,6 @@ await storage.s3client?.send(
 );
 ```
 
-### Per-call bucket
-
-On S3 every method falls back to the configured `bucket`; pass a different one to address another bucket with the same client and credentials. For methods with an `fs` options parameter it is `options.bucket`; for `exists`, `rename` and `copyFile` it is the last positional argument; `getSignedUrl` / `getSignedPutUrl` use `opts.bucket`. If neither is set, an `Error` is thrown. The `prefix` still applies.
-
-```ts
-await storage.writeFile('a.txt', 'hello', { bucket: 'other-bucket', contentType: 'text/plain' });
-await storage.readFile('a.txt', { encoding: 'utf8', bucket: 'other-bucket' });
-await storage.stat('a.txt', { bucket: 'other-bucket' });
-await storage.exists('a.txt', 'other-bucket');
-await storage.copyFile('a.txt', 'b.txt', undefined, 'other-bucket'); // mode is skipped with undefined
-```
-
-Copies and renames stay within one bucket. With [multiple disks](#multiple-disks) you can instead configure one disk per bucket.
-
 ## How S3 differs from a real filesystem
 
 - **Keys never start with `/`.** Leading slashes are stripped from every path, so `'/uploads/x.png'` is the key `uploads/x.png`, and `'/'` is the root, not a folder of its own. Objects that were stored under a key starting with `/` (written by an older version without a `prefix`) are not reachable until renamed, see [Upgrading from 0.4.x](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/nestjs/CHANGELOG.md#upgrading-from-04x).
@@ -561,7 +787,7 @@ Copies and renames stay within one bucket. With [multiple disks](#multiple-disks
   - `exists` throws on errors other than "not found" (403, network, ...), where `fs.existsSync` returns `false`.
   - A missing parent folder is fine on S3 for `writeFile`, `copyFile`, `rename` and recursive `mkdir`.
   - `stat` fields other than size, `mtime`, `contentType` and `etag` are synthesized.
-  - `readdir` output is sorted on S3 (and de-duplicated); the filesystem order is whatever `fs` returns.
+  - `readdir` output is always sorted (plain code-unit order, on every backend); on S3 it is also de-duplicated.
   - `readdir` does not support `withFileTypes`; `readFile` / `writeFile` ignore `flag`, `mode` is ignored on S3, and `mkdir` resolves to `undefined` on S3.
 - **No real metadata.** Ownership, permissions and timestamps other than `mtime` are synthesized (see [stat](#stat-and-storagestats)).
 - **S3-compatible providers** (MinIO, Cloudflare R2, Hetzner, ...) may reject the AWS SDK's default checksums, which breaks multipart uploads. When `endpoint` is set, `requestChecksumCalculation` and `responseChecksumValidation` therefore default to `'WHEN_REQUIRED'`, so you do not need to set them (usually `forcePathStyle: true` is still needed). To opt back in to the SDK defaults, set either option to `'WHEN_SUPPORTED'` explicitly; without `endpoint` (plain AWS) the SDK defaults apply anyway:
@@ -580,7 +806,7 @@ createStorage({
 
 ## FTP and SFTP
 
-Both backends behave like the filesystem backend, not like S3: folders are real, a missing parent folder is `ENOENT`, writing below a file is `ENOTDIR`, and failures are the same Node-style errors (`ENOENT`, `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL`, `ERR_FS_EISDIR`, and `EACCES` on SFTP). `readdir` supports `recursive` (folders are included, as paths relative to the folder) and `mkdir` / `rmdir` default to `recursive: true` as everywhere. `prefix` is the remote base directory: absolute, or relative to the login directory (`'.'` is the login directory itself); paths escaping it throw. The directory itself is never created, so it must exist. Signed URLs are not supported (`getSignedUrl` and `getSignedPutUrl` throw) and `s3client` is `undefined`. `bucket` options are ignored. `readFile` and `writeFile` buffer the whole file in memory; use the streams for large files.
+Both backends behave like the filesystem backend, not like S3: folders are real, a missing parent folder is `ENOENT`, writing below a file is `ENOTDIR`, and failures are the same Node-style errors (`ENOENT`, `EEXIST`, `EISDIR`, `ENOTDIR`, `ENOTEMPTY`, `EINVAL`, `ERR_FS_EISDIR`, and `EACCES` on SFTP). `readdir` supports `recursive` (folders are included, as paths relative to the folder) and `mkdir` / `rmdir` default to `recursive: true` as everywhere. `prefix` is the remote base directory: absolute, or relative to the login directory (`'.'` is the login directory itself); paths escaping it throw. The directory itself is never created, so it must exist. Signed URLs are not supported (`getSignedUrl` and `getSignedPutUrl` throw `ERR_STORAGE_NOT_SUPPORTED`) and `s3client` is `undefined`. `bucket` options are ignored. `readFile` and `writeFile` buffer the whole file in memory; use the streams for large files.
 
 ```ts
 const partner = storage.disk('partner'); // the sftp disk of the multi-disk example
@@ -656,7 +882,7 @@ try {
 }
 ```
 
-`isStorageError(e)` without a code accepts any error with a string `code`. `StorageErrorCode` lists the codes the library emulates (`ENOENT`, `EACCES`, `EEXIST`, `ENOTDIR`, `EISDIR`, `EINVAL`, `ENOTEMPTY`, `ERR_FS_EISDIR`; `EACCES` is reported by the SFTP backend); any string is accepted. `StorageError` also has `cleanupError`, see [`rename`](#how-s3-differs-from-a-real-filesystem).
+`isStorageError(e)` without a code accepts any error with a string `code`. `StorageErrorCode` lists the codes the library emulates (`ENOENT`, `EACCES`, `EEXIST`, `ENOTDIR`, `EISDIR`, `EINVAL`, `ENOTEMPTY`, `ERR_FS_EISDIR`; `EACCES` is reported by the SFTP backend) and `ERR_STORAGE_NOT_SUPPORTED` (an operation the disk's driver does not implement, e.g. signed URLs outside S3); any string is accepted. `StorageError` also has `cleanupError`, see [`rename`](#how-s3-differs-from-a-real-filesystem).
 
 ## Testing with the memory backend
 

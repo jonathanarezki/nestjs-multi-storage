@@ -109,9 +109,9 @@ describeS3('write streams (S3 specifics)', () => {
   });
 
   it('surfaces an upload error (nonexistent bucket) as an error event', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'ws-err');
+    const ctx = await createCtx(S3_BACKEND, 'ws-err', { overrides: { bucket: 'no-such-bucket' } });
     try {
-      const ws = ctx.service.createWriteStream('x.bin', { bucket: 'no-such-bucket' });
+      const ws = ctx.service.createWriteStream('x.bin');
       let finished = false;
       ws.on('finish', () => (finished = true));
       await expect(

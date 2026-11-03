@@ -1,9 +1,19 @@
+import { StorageDriver } from './storage-driver.interface';
+
 export interface StorageModuleOptions {
   /**
    * `memory` keeps everything in a private in-memory volume (needs the optional peer dependency `memfs`).
    * `ftp` needs the optional peer dependency `basic-ftp`, `sftp` needs `ssh2`.
    */
   type: 'fileSystem' | 's3' | 'memory' | 'ftp' | 'sftp';
+  /**
+   * All types, experimental (see `StorageDriver`). Called once, when the driver is first used, with the built-in
+   * driver: returns the driver the disk uses instead (to add encryption, read-only access, logging, caching, ...).
+   * The result must implement the required `StorageDriver` methods. `init` and `destroy` of the wrapper are called if it
+   * has them (it must forward them to `inner` itself); if it has none, those of `inner` are called, so a wrapper
+   * that leaves them out does not leak the connections.
+   */
+  wrap?: (inner: StorageDriver) => StorageDriver;
   endpoint?: string;
   endpointCDN?: string;
   region?: string;
@@ -47,8 +57,25 @@ export interface StorageModuleOptions {
   files?: Record<string, string | Buffer>;
 }
 
+/**
+ * A disk backed by your own `StorageDriver`, which owns its configuration (no prefix, bucket, ...).
+ *
+ * @experimental The driver interface may change in a minor release of 0.8.x.
+ */
+export interface StorageCustomDiskOptions {
+  type: 'custom';
+  /**
+   * The driver, or a synchronous factory for it: called lazily (on first use or by `init()`), at most once, and
+   * never by `destroy()` of a disk that was not used. An instance is checked for the required methods by
+   * `createStorage`; a factory's result when it is called.
+   */
+  driver: StorageDriver | (() => StorageDriver);
+  /** Called once with the driver, when it is created: returns the driver the disk uses instead. See `StorageModuleOptions.wrap`. */
+  wrap?: (inner: StorageDriver) => StorageDriver;
+}
+
 /** The options of one named disk (same shape as the single-store options). */
-export type StorageDiskOptions = StorageModuleOptions;
+export type StorageDiskOptions = StorageModuleOptions | StorageCustomDiskOptions;
 
 /** Several named disks; `default` is the one `Storage` itself operates on. */
 export interface StorageMultiDiskOptions {
@@ -57,4 +84,4 @@ export interface StorageMultiDiskOptions {
 }
 
 /** What `createStorage` (and nestjs-multi-storage's `StorageModule`) accepts: a single store (the disk named `'default'`) or several named disks. */
-export type StorageConfig = StorageModuleOptions | StorageMultiDiskOptions;
+export type StorageConfig = StorageDiskOptions | StorageMultiDiskOptions;

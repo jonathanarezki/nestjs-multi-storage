@@ -130,6 +130,34 @@ export function sftpOptions(prefix: string, overrides: Partial<StorageModuleOpti
   };
 }
 
+/** A fresh isolated prefix for `backend` (a tmp dir, an in-memory root, a key prefix or a remote directory) and the options of a disk on it. */
+export function backendOptions(
+  backend: Backend,
+  label: string,
+  overrides: Partial<StorageModuleOptions> = {},
+): { prefix: string; options: StorageModuleOptions } {
+  const slug = label.replace(/[^a-z0-9]+/gi, '-').slice(0, 40);
+  const memory = backend.name === 'memory';
+  const unique = `${slug}-${randomUUID().slice(0, 8)}`;
+  const prefix = backend.isS3
+    ? `e2e/${unique}`
+    : memory
+    ? `/e2e/${unique}`
+    : backend.name === 'ftp'
+    ? path.posix.join(FTP_SERVER.dir, 'e2e', unique)
+    : backend.name === 'sftp'
+    ? path.posix.join(SFTP_SERVER.dir, 'e2e', unique)
+    : fs.mkdtempSync(path.join(os.tmpdir(), 'nestjs-multi-storage-e2e-'));
+  const options: StorageModuleOptions = backend.isS3
+    ? s3Options(prefix, overrides)
+    : backend.name === 'ftp'
+    ? ftpOptions(prefix, overrides)
+    : backend.name === 'sftp'
+    ? sftpOptions(prefix, overrides)
+    : { type: memory ? 'memory' : 'fileSystem', prefix, ...overrides };
+  return { prefix, options };
+}
+
 let viaNamedDisk = false;
 /**
  * Makes `createCtx` run every context through a named disk of a multi-disk module (`ctx.service` is then
@@ -172,27 +200,8 @@ export async function createCtx(
   label: string,
   opts: { overrides?: Partial<StorageModuleOptions>; async?: boolean } = {},
 ): Promise<Ctx> {
-  const slug = label.replace(/[^a-z0-9]+/gi, '-').slice(0, 40);
-  const memory = backend.name === 'memory';
+  const { prefix, options } = backendOptions(backend, label, opts.overrides);
   const remote = backend.name === 'ftp' || backend.name === 'sftp';
-  const unique = `${slug}-${randomUUID().slice(0, 8)}`;
-  const prefix = backend.isS3
-    ? `e2e/${unique}`
-    : memory
-    ? `/e2e/${unique}`
-    : backend.name === 'ftp'
-    ? path.posix.join(FTP_SERVER.dir, 'e2e', unique)
-    : backend.name === 'sftp'
-    ? path.posix.join(SFTP_SERVER.dir, 'e2e', unique)
-    : fs.mkdtempSync(path.join(os.tmpdir(), 'nestjs-multi-storage-e2e-'));
-  const options: StorageModuleOptions = backend.isS3
-    ? s3Options(prefix, opts.overrides)
-    : backend.name === 'ftp'
-    ? ftpOptions(prefix, opts.overrides)
-    : backend.name === 'sftp'
-    ? sftpOptions(prefix, opts.overrides)
-    : { type: memory ? 'memory' : 'fileSystem', prefix, ...opts.overrides };
-
   const config: StorageConfig = viaNamedDisk
     ? { default: 'main', disks: { main: { type: 'memory' }, named: options } }
     : options;
@@ -213,8 +222,8 @@ export async function createCtx(
   // Like the filesystem, a remote prefix must exist: create it (and its parents) for the test
   if (remote) await service.mkdir('');
   // The S3 client is created by the first operation: a standalone context makes one (without init()), as the suites
-  // that tweak the client expect it to exist
-  if (standalone && backend.isS3) await service.exists('');
+  // that tweak the client expect it to exist (the call may fail: a test can configure a bucket that does not exist)
+  if (standalone && backend.isS3) await service.exists('').catch(() => undefined);
 
   return {
     backend,
@@ -287,7 +296,8 @@ export async function rawKeys(service: StorageDisk, Prefix: string): Promise<str
 
 /** The S3 driver behind a service (S3 backend only), for tests that tweak its private settings. */
 export function s3Internals(service: StorageDisk): any {
-  return (service as any).driver;
+  const source = (service as any).source;
+  return source.builtin ?? source.get();
 }
 
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

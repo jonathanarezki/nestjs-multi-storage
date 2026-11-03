@@ -1,16 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Readable } from 'stream';
+import { StorageModuleOptions } from '../interfaces';
 import {
-  StorageCreateReadStreamOptions,
-  StorageMkdirOptions,
-  StorageModuleOptions,
-  StorageReaddirOptions,
-  StorageReadFileOptions,
-} from '../interfaces';
-import { fsError } from './fs-error';
+  DriverMkdirOptions,
+  DriverReaddirOptions,
+  DriverReadFileOptions,
+  DriverReadStreamOptions,
+} from '../interfaces/storage-driver.interface';
+import { createFsError } from './fs-error';
 import { FileSystemDriver } from './file-system.driver';
-import { defined, encodeNames, readdirOptions, splitBucket } from './options';
+import { defined } from './options';
 
 /**
  * The `memory` backend: the filesystem driver on a private in-memory (memfs) volume.
@@ -18,8 +18,6 @@ import { defined, encodeNames, readdirOptions, splitBucket } from './options';
  * Node's fs does (verified against the real fs in the parity tests).
  */
 export class MemoryDriver extends FileSystemDriver {
-  protected readonly label: string = 'memory';
-
   constructor(options: StorageModuleOptions) {
     super(options);
     // memfs is an optional peer dependency: only loaded when the memory backend is used
@@ -44,31 +42,21 @@ export class MemoryDriver extends FileSystemDriver {
     }
   }
 
-  async mkdir(folderPath: string, options?: StorageMkdirOptions): Promise<string | undefined> {
-    const recursive = options?.recursive ?? true;
-
-    return this.memMkdir(this.fsPath(folderPath), recursive, options?.mode);
+  async mkdir(folderPath: string, options: DriverMkdirOptions): Promise<string | undefined> {
+    return this.memMkdir(this.fsPath(folderPath), options.recursive, options.mode);
   }
 
-  async readdir(folderPath: string, options?: BufferEncoding | StorageReaddirOptions): Promise<string[]> {
-    const opts = readdirOptions(options);
-
-    if (opts.recursive) {
-      return this.memReaddirRecursive(this.fsPath(folderPath), opts.encoding);
+  async readdir(folderPath: string, options: DriverReaddirOptions): Promise<string[]> {
+    if (options.recursive) {
+      return this.memReaddirRecursive(this.fsPath(folderPath));
     }
     return super.readdir(folderPath, options);
   }
 
-  async readFile(
-    filePath: string,
-    options: BufferEncoding | (StorageReadFileOptions & { encoding: BufferEncoding }),
-  ): Promise<string>;
-  async readFile(filePath: string, options?: (StorageReadFileOptions & { encoding?: null }) | null): Promise<Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer> {
+  async readFile(filePath: string, options: DriverReadFileOptions): Promise<Buffer> {
     return super.readFile(filePath, options).catch((e) => {
       // memfs leaves the path out of the EISDIR error (memory shim)
-      if (e?.code === 'EISDIR' && !e.path) throw fsError('EISDIR', 'read', this.fsPath(filePath));
+      if (e?.code === 'EISDIR' && !e.path) throw createFsError('EISDIR', 'read', this.fsPath(filePath));
       throw e;
     });
   }
@@ -79,10 +67,8 @@ export class MemoryDriver extends FileSystemDriver {
     return super.rename(oldPath, newPath);
   }
 
-  createReadStream(filePath: string, options?: StorageCreateReadStreamOptions): Readable {
-    const { fsOptions } = splitBucket(options);
-
-    return this.memReadStream(this.fsPath(filePath), fsOptions);
+  createReadStream(filePath: string, options: DriverReadStreamOptions): Readable {
+    return this.memReadStream(this.fsPath(filePath), options);
   }
 
   private memStat(p: string) {
@@ -113,7 +99,7 @@ export class MemoryDriver extends FileSystemDriver {
     }
     const existing = this.memStat(full);
     if (existing && !existing.isDirectory()) {
-      throw fsError('EEXIST', 'mkdir', full);
+      throw createFsError('EEXIST', 'mkdir', full);
     }
     let first = full;
     while (!this.memStat(path.dirname(first)) && path.dirname(first) !== first) {
@@ -124,7 +110,7 @@ export class MemoryDriver extends FileSystemDriver {
   }
 
   /** memfs lists a recursive readdir in another order than Node (parents first, then breadth-first per folder). */
-  private async memReaddirRecursive(full: string, encoding?: string): Promise<any[]> {
+  private async memReaddirRecursive(full: string): Promise<string[]> {
     const names: string[] = [];
     const queue = [''];
     for (let dir = queue.shift(); dir !== undefined; dir = queue.shift()) {
@@ -135,7 +121,7 @@ export class MemoryDriver extends FileSystemDriver {
         if (entry.isDirectory()) queue.push(relative);
       }
     }
-    return encodeNames(names, encoding);
+    return names;
   }
 
   /** memfs does not check these rename cases and silently replaces or moves into itself. */
@@ -143,34 +129,26 @@ export class MemoryDriver extends FileSystemDriver {
     const source = this.memStat(src);
     if (!source || path.resolve(src) === path.resolve(dest)) return;
     if (source.isDirectory() && path.resolve(dest).startsWith(path.resolve(src) + path.sep)) {
-      throw fsError('EINVAL', 'rename', src, dest);
+      throw createFsError('EINVAL', 'rename', src, dest);
     }
     const target = this.memStat(dest);
     if (!target) return;
-    if (source.isDirectory() && !target.isDirectory()) throw fsError('ENOTDIR', 'rename', src, dest);
-    if (!source.isDirectory() && target.isDirectory()) throw fsError('EISDIR', 'rename', src, dest);
+    if (source.isDirectory() && !target.isDirectory()) throw createFsError('ENOTDIR', 'rename', src, dest);
+    if (!source.isDirectory() && target.isDirectory()) throw createFsError('EISDIR', 'rename', src, dest);
     if (source.isDirectory() && this.fs.readdirSync(dest).length > 0) {
-      throw fsError('ENOTEMPTY', 'rename', src, dest);
+      throw createFsError('ENOTEMPTY', 'rename', src, dest);
     }
   }
 
-  /** memfs ignores `end` without `start`, reads a directory as empty and words the start > end error differently. */
-  private memReadStream(full: string, options: Record<string, any>): Readable {
+  /** memfs ignores `end` without `start` and reads a directory as empty. */
+  private memReadStream(full: string, options: DriverReadStreamOptions): Readable {
     const { start, end } = options;
-    if (typeof start === 'number' && typeof end === 'number' && start > end) {
-      const error: NodeJS.ErrnoException = new RangeError(
-        `The value of "start" is out of range. It must be <= "end" (here: ${end}). Received ${start}`,
-      );
-      error.code = 'ERR_OUT_OF_RANGE';
-      throw error;
-    }
     if (this.memStat(full)?.isDirectory()) {
       const failing = new Readable({ read() {} });
-      if (options.encoding) failing.setEncoding(options.encoding);
-      process.nextTick(() => failing.destroy(fsError('EISDIR', 'read')));
+      process.nextTick(() => failing.destroy(createFsError('EISDIR', 'read')));
       return failing;
     }
     const fixed = typeof end === 'number' && start === undefined ? { ...options, start: 0 } : options;
-    return this.fs.createReadStream(full, fixed) as Readable;
+    return this.fs.createReadStream(full, defined(fixed)) as Readable;
   }
 }

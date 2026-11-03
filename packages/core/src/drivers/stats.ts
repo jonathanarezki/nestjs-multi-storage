@@ -9,8 +9,9 @@ export function defaultMode(isDirectory: boolean): number {
 /**
  * Builds the `StorageStats` of a remote entry. The type predicates come from the type bits of `mode`; `atime` defaults
  * to `mtime`, `uid` and `gid` to 0. `ctime` and `birthtime` are not known remotely and are `mtime`.
+ * @experimental May change in a minor release of 0.8.x.
  */
-export function buildStats(entry: {
+export function createStats(entry: {
   mode: number;
   size: number;
   mtime: Date;

@@ -16,7 +16,7 @@ import {
 const MiB = 1024 * 1024;
 
 /** The ftp driver behind a service, for the tests that look at (or break) its connection pool. */
-const internals = (service: StorageDisk): any => (service as any).driver;
+const internals = (service: StorageDisk): any => (service as any).source.get();
 
 /** Writes `data` through a write stream and resolves when 'finish' is emitted. */
 const upload = (service: StorageDisk, name: string, data: Buffer) =>
@@ -100,7 +100,7 @@ describeFtp('ftp pool (maxConnections 2)', () => {
     // The next operation gets a new connection
     expect(await service.exists('a.txt')).toBe(true);
 
-    const failing = (service as any).driver;
+    const failing = (service as any).source.get();
     const original = failing.lookup.bind(failing);
     let attempts = 0;
     failing.lookup = async (c: any) => {
@@ -167,8 +167,8 @@ describeFtp('ftp pool (maxConnections 2)', () => {
 
   it('getSignedUrl and getSignedPutUrl are not supported', async () => {
     const { service } = h.ctx;
-    await expect(service.getSignedUrl('a.txt')).rejects.toThrow('Signed URLs are not supported for ftp storage.');
-    await expect(service.getSignedPutUrl('a.txt')).rejects.toThrow('Signed URLs are not supported for ftp storage.');
+    await expect(service.getSignedUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
+    await expect(service.getSignedPutUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
   });
 });
 

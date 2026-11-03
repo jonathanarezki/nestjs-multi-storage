@@ -20,7 +20,7 @@ import { generateEd25519 } from './support/keys';
 const MiB = 1024 * 1024;
 
 /** The SFTP driver behind a service, for tests that look at (or break) its connection. */
-const internals = (service: unknown): any => (service as any).driver;
+const internals = (service: unknown): any => (service as any).source.get();
 
 /** Records the sockets the driver opens, so that a test can check that none is left open. */
 function trackSockets() {
@@ -465,8 +465,8 @@ describeSftp('sftp files and streams', () => {
 
   it('getSignedUrl and getSignedPutUrl are not supported', async () => {
     const { service } = h.ctx;
-    await expect(service.getSignedUrl('a.txt')).rejects.toThrow('Signed URLs are not supported for sftp storage.');
-    await expect(service.getSignedPutUrl('a.txt')).rejects.toThrow('Signed URLs are not supported for sftp storage.');
+    await expect(service.getSignedUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
+    await expect(service.getSignedPutUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
   });
 });
 

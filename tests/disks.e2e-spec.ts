@@ -6,6 +6,7 @@ import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Readable } from 'stream';
 import {
   getStorageToken,
   InjectStorage,
@@ -335,26 +336,87 @@ describe('multi-disk: API completeness', () => {
       for (const method of FILE_API_METHODS) {
         driver[method] = (...args: unknown[]) => {
           calls.push({ method, args });
-          return `result of ${method}`;
+          return method === 'readdir' ? [`result of ${method}`] : `result of ${method}`;
         };
       }
       // the disk is a thin wrapper around its driver: swap the driver for a recorder
       const target: any = disk;
-      const original = target.driver;
-      target.driver = driver;
+      const original = target.source;
+      target.source = { get: () => driver };
       try {
         for (const method of FILE_API_METHODS) {
-          const args = [`${method}-a`, `${method}-b`, 3, `${method}-d`];
-          expect(await (disk as any)[method](...args)).toBe(`result of ${method}`);
+          const args = [`${method}-a`, 'utf8', 3, `${method}-d`];
+          expect(await (disk as any)[method](...args)).toEqual(
+            method === 'readdir' ? [`result of ${method}`] : `result of ${method}`,
+          );
           const call = calls.find((c) => c.method === method)!;
-          // the disk passes its arguments on as they are (a disk method ignores the surplus ones of a shorter signature)
-          expect(call.args.slice(0, 2)).toEqual(args.slice(0, 2));
+          // the disk passes the path on as it is (the options are normalized first, see the option tests)
+          expect(call.args[0]).toEqual(args[0]);
         }
         expect(calls.map((c) => c.method).sort()).toEqual([...FILE_API_METHODS].sort());
       } finally {
-        target.driver = original;
+        target.source = original;
       }
     }
+    await moduleRef.close();
+  });
+
+  it('normalizes the arguments before they reach the driver (defaults, shorthands, bytes, encodings)', async () => {
+    const moduleRef = await Test.createTestingModule({ imports: [StorageModule.forRoot(memory)] }).compile();
+    const storage = moduleRef.get(StorageService);
+    const calls: Array<[string, ...unknown[]]> = [];
+    const record =
+      (method: string, result: unknown = undefined) =>
+      (...args: unknown[]) => {
+        calls.push([method, ...args]);
+        return Promise.resolve(result);
+      };
+    (storage as any).source = { get: () => driverMock };
+    const driverMock = {
+      mkdir: record('mkdir'),
+      rmdir: record('rmdir'),
+      rm: record('rm'),
+      copyFile: record('copyFile'),
+      readdir: record('readdir', ['é', 'a']),
+      readFile: record('readFile', Buffer.from('héllo')),
+      writeFile: record('writeFile'),
+      createReadStream: (...args: unknown[]) => {
+        calls.push(['createReadStream', ...args]);
+        return Readable.from([Buffer.from('é')]);
+      },
+    };
+    await storage.mkdir('a');
+    await storage.rmdir('a');
+    await storage.rm('a');
+    await storage.copyFile('a', 'b');
+    await storage.writeFile('a', 'héllo', 'latin1');
+    await storage.writeFile('a', new Uint8Array([1, 2]), { mode: 0o600, contentType: 'x/y' });
+    expect(await storage.readFile('a', 'utf8')).toBe('héllo');
+    expect(await storage.readFile('a', { encoding: null })).toEqual(Buffer.from('héllo'));
+    // the disk sorts the driver's names (code-unit order of the UTF-8 names) before encoding them
+    expect(await storage.readdir('a', 'hex')).toEqual(['61', Buffer.from('é').toString('hex')]);
+    expect(await storage.readdir('a', { encoding: 'buffer' as BufferEncoding })).toEqual([
+      Buffer.from('a'),
+      Buffer.from('é'),
+    ]);
+    const stream = storage.createReadStream('a', { encoding: 'utf8', start: 1 });
+    expect(await stream.toArray()).toEqual(['é']);
+    expect(() => storage.createReadStream('a', { start: 5, end: 1 })).toThrow(/start/);
+    await expect(storage.readFile('a', 'nope' as BufferEncoding)).rejects.toMatchObject({
+      code: 'ERR_INVALID_ARG_VALUE',
+    });
+
+    const byMethod = (method: string) => calls.filter((c) => c[0] === method).map((c) => c.slice(1));
+    expect(byMethod('mkdir')).toEqual([['a', { recursive: true, mode: undefined }]]);
+    expect(byMethod('rmdir')).toEqual([['a', { recursive: true }]]);
+    expect(byMethod('rm')).toEqual([['a', { force: false, recursive: false }]]);
+    expect(byMethod('copyFile')).toEqual([['a', 'b', 0]]);
+    expect(byMethod('readdir')[0]).toEqual(['a', { recursive: false }]);
+    expect(byMethod('writeFile')).toEqual([
+      ['a', Buffer.from('héllo', 'latin1'), { mode: undefined, flag: undefined, contentType: undefined }],
+      ['a', Buffer.from([1, 2]), { mode: 0o600, flag: undefined, contentType: 'x/y' }],
+    ]);
+    expect(byMethod('createReadStream')).toEqual([['a', { start: 1, end: undefined, highWaterMark: undefined }]]);
     await moduleRef.close();
   });
 
@@ -504,7 +566,7 @@ describe('multi-disk: lifecycle errors', () => {
     Test.createTestingModule({
       imports: [StorageModule.forRoot({ default: names[0], disks: Object.fromEntries(names.map((n) => [n, memory])) })],
     }).compile();
-  const driverOf = (storage: StorageService, name: string) => (storage.disk(name) as any).driver;
+  const driverOf = (storage: StorageService, name: string) => (storage.disk(name) as any).source.get();
 
   it('an init failure on one disk fails the app init', async () => {
     const moduleRef = await build();

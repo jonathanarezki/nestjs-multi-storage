@@ -1,7 +1,7 @@
-export * from './storage.module';
-export * from './storage.service';
+export * from './storage';
 export * from './storage-disk';
-export * from './inject-storage.decorator';
 export * from './interfaces';
 export { isStorageError } from './storage-error';
 export type { StorageError, StorageErrorCode } from './storage-error';
+export { createFsError, createRmDirectoryError } from './drivers/fs-error';
+export { createStats } from './drivers/stats';

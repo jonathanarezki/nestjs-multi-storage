@@ -17,6 +17,7 @@
   "maxWorkers": 4,
   "moduleNameMapper": {
     "^@webbar/node-multi-storage$": "<rootDir>/../packages/core/src",
+    "^@webbar/node-multi-storage/testing$": "<rootDir>/../packages/core/src/testing",
     "^nestjs-multi-storage$": "<rootDir>/../packages/nestjs/src"
   }
 }

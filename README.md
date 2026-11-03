@@ -6,10 +6,10 @@ A multi-storage filesystem manager for Node whose API mirrors `fs.promises`. Cod
 
 This repository is an npm workspaces monorepo with two packages:
 
-| Package                                                         | Version                                                                                                                         | What it is                                                                                                                                        |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`@webbar/node-multi-storage`](packages/core) (`packages/core`) | [![npm](https://img.shields.io/npm/v/@webbar/node-multi-storage.svg)](https://www.npmjs.com/package/@webbar/node-multi-storage) | The framework-agnostic core: `createStorage`, all five backends, errors and types. Works in plain Node, Express, Next.js (Node runtime) and more. |
-| [`nestjs-multi-storage`](packages/nestjs) (`packages/nestjs`)   | [![npm](https://img.shields.io/npm/v/nestjs-multi-storage.svg)](https://www.npmjs.com/package/nestjs-multi-storage)             | A thin NestJS wrapper around the core: `StorageModule`, `StorageService`, `@InjectStorage`. Same API as 0.6.0.                                    |
+| Package                                                         | Version                                                                                                                         | What it is                                                                                                                                                                                                       |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [`@webbar/node-multi-storage`](packages/core) (`packages/core`) | [![npm](https://img.shields.io/npm/v/@webbar/node-multi-storage.svg)](https://www.npmjs.com/package/@webbar/node-multi-storage) | The framework-agnostic core: `createStorage`, the five built-in backends plus custom drivers (experimental), a driver test kit, errors and types. Works in plain Node, Express, Next.js (Node runtime) and more. |
+| [`nestjs-multi-storage`](packages/nestjs) (`packages/nestjs`)   | [![npm](https://img.shields.io/npm/v/nestjs-multi-storage.svg)](https://www.npmjs.com/package/nestjs-multi-storage)             | A thin NestJS wrapper around the core: `StorageModule`, `StorageService`, `@InjectStorage`, with the same disks and file API as the core.                                                                        |
 
 ## Which one to install
 
@@ -24,7 +24,7 @@ The repository uses npm workspaces (`packages/*`); run `npm install` once at the
 
 ```bash
 npm run build           # builds the core, then the NestJS package
-npm run check:api       # the NestJS package's public API vs. the 0.6.0 baseline (run after npm run build)
+npm run check:api       # the NestJS package's public API vs. the 0.8.0 baseline in scripts/api-compat (run after npm run build)
 ```
 
 ### Testing

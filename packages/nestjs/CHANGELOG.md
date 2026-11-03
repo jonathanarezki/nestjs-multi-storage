@@ -4,6 +4,39 @@ All notable changes to this project are documented in this file. The format is b
 
 Releases before 0.5.0 are listed on the [GitHub releases page](https://github.com/jonathanarezki/node-multi-storage/releases).
 
+## [0.8.0] - 2026-11-03
+
+### Upgrading from 0.7.x
+
+- **BREAKING:** The per-call `bucket` is removed. It was an option of `mkdir`, `readdir`, `rmdir`, `rm`, `stat`, `readFile`, `writeFile`, `createReadStream` and `createWriteStream`, the last parameter of `exists`, `rename` and `copyFile`, and `opts.bucket` of `getSignedUrl` and `getSignedPutUrl`. `StorageBucketOptions` is removed too. An S3 disk now always uses the `bucket` of its configuration, which is required (a disk without it throws `type 's3' requires "bucket"` when it is created, instead of `No bucket configured` on the first call). To use several buckets, configure one disk per bucket:
+
+  ```ts
+  // Before
+  StorageModule.forRoot({ type: 's3', bucket: 'my-uploads' }); // storage: the injected StorageService
+  await storage.writeFile('a.txt', 'hello', { bucket: 'my-exports' });
+  await storage.exists('a.txt', 'my-exports');
+
+  // After
+  StorageModule.forRoot({
+    default: 'uploads',
+    disks: {
+      uploads: { type: 's3', bucket: 'my-uploads' },
+      exports: { type: 's3', bucket: 'my-exports' },
+    },
+  }); // storage: the injected StorageService
+  await storage.disk('exports').writeFile('a.txt', 'hello');
+  await storage.disk('exports').exists('a.txt');
+  ```
+
+### Added
+
+- **Custom drivers (experimental).** `StorageModule.forRoot` and `forRootAsync` accept disks of the type `{ type: 'custom', driver }` (a `StorageDriver` instance or a synchronous factory, created lazily) and the `wrap` option on every disk type. `StorageDriver`, `StorageCustomDiskOptions`, the `Driver*Options` types, `createFsError`, `createRmDirectoryError` and `createStats` are re-exported from the core. The driver interface is experimental in 0.8.x. See the [core README](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#custom-drivers-experimental).
+
+### Changed
+
+- `readdir` results are always sorted, `createReadStream` with `start > end` throws on every backend, and unknown encodings are rejected with `ERR_INVALID_ARG_VALUE` (all BREAKING for code that relied on the old behaviour; see the core changelog).
+- `getSignedUrl` and `getSignedPutUrl` on non-S3 disks now reject with the error code `ERR_STORAGE_NOT_SUPPORTED` (see the [core changelog](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/CHANGELOG.md)).
+
 ## [0.7.0] - 2026-11-02
 
 The NestJS wrapper now sits on top of the new framework-agnostic [`@webbar/node-multi-storage`](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md) package, which holds the implementation. The public API is identical to 0.6.0, with one breaking change to the dependencies (see below). The source moved to the renamed repository, [node-multi-storage](https://github.com/jonathanarezki/node-multi-storage), a monorepo with the packages `@webbar/node-multi-storage` and `nestjs-multi-storage`.

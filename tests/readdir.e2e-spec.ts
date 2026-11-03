@@ -1,4 +1,4 @@
-import { describeBackends, describeS3, S3_BACKEND, S3_BUCKET, createCtx } from './support/harness';
+import { describeBackends, describeS3, S3_BACKEND, createCtx } from './support/harness';
 import { useCtx } from './support/harness';
 
 describeBackends('readdir', (backend) => {
@@ -34,14 +34,6 @@ describeBackends('readdir', (backend) => {
   });
 
   if (backend.isS3) {
-    it('accepts the bucket as option', async () => {
-      await seed();
-      const { service } = h.ctx;
-      const expected = ['3.txt', 'a', 'c'];
-      expect(await service.readdir('t', { bucket: S3_BUCKET })).toEqual(expected);
-      expect(await service.readdir('t', { recursive: true, bucket: S3_BUCKET })).toHaveLength(6);
-    });
-
     it('returns S3 results sorted', async () => {
       const { service } = h.ctx;
       for (const name of ['b.txt', 'a.txt', 'C.txt', 'a2.txt', '_z.txt']) await service.writeFile(`s/${name}`, 'x');
@@ -51,11 +43,6 @@ describeBackends('readdir', (backend) => {
       const recursive = await service.readdir('s', { recursive: true });
       expect(recursive).toEqual([...recursive].sort());
       expect(recursive).toContain('dir/inner.txt');
-    });
-
-    it('rejects for a nonexistent bucket', async () => {
-      await expect(h.ctx.service.readdir('t', { bucket: 'no-such-bucket' })).rejects.toThrow();
-      await expect(h.ctx.service.readdir('t', { bucket: 'no-such-bucket', recursive: true })).rejects.toThrow();
     });
   }
 });

@@ -18,8 +18,8 @@ describeBackends('signed URLs on the filesystem', (backend) => {
   const h = useCtx(backend, 'signed-fs');
 
   it('throw on the filesystem backend', async () => {
-    await expect(h.ctx.service.getSignedUrl('a.txt')).rejects.toThrow('Signed URLs are not supported');
-    await expect(h.ctx.service.getSignedPutUrl('a.txt')).rejects.toThrow('Signed URLs are not supported');
+    await expect(h.ctx.service.getSignedUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
+    await expect(h.ctx.service.getSignedPutUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
   });
 });
 
@@ -113,11 +113,13 @@ describeS3('S3 client and signed URLs', () => {
     }
   });
 
-  it('signs for another bucket when asked to', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'signed-bucket');
+  it('signs for the bucket of the disk', async () => {
+    const ctx = await createCtx(S3_BACKEND, 'signed-bucket', { overrides: { bucket: 'other-bucket' } });
     try {
-      const url = await ctx.service.getSignedUrl('x.txt', { bucket: 'other-bucket' });
+      const url = await ctx.service.getSignedUrl('x.txt');
       expect(new URL(url).pathname.startsWith('/other-bucket/')).toBe(true);
+      const put = await ctx.service.getSignedPutUrl('x.txt');
+      expect(new URL(put).pathname.startsWith('/other-bucket/')).toBe(true);
     } finally {
       await ctx.close();
     }
@@ -176,12 +178,12 @@ describeS3('S3 client and signed URLs', () => {
 });
 
 describeS3('buckets and options (S3)', () => {
-  it('addresses another bucket via the bucket option (rejects when it does not exist)', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'other-bucket');
+  it('a disk of another bucket rejects when that bucket does not exist', async () => {
+    const ctx = await createCtx(S3_BACKEND, 'other-bucket', { overrides: { bucket: 'no-such-bucket' } });
     try {
-      await expect(ctx.service.writeFile('a.txt', 'x', { bucket: 'no-such-bucket' })).rejects.toThrow();
-      await expect(ctx.service.readFile('a.txt', { bucket: 'no-such-bucket' })).rejects.toThrow();
-      await expect(ctx.service.stat('a.txt', { bucket: 'no-such-bucket' })).rejects.toThrow();
+      await expect(ctx.service.writeFile('a.txt', 'x')).rejects.toThrow();
+      await expect(ctx.service.readFile('a.txt')).rejects.toThrow();
+      await expect(ctx.service.stat('a.txt')).rejects.toThrow();
     } finally {
       await ctx.close();
     }

@@ -302,7 +302,7 @@ A name listed in `disks` that the factory does not return fails the bootstrap wi
 
 ### Several buckets
 
-The [per-call `bucket`](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#per-call-bucket) parameter is still supported and unchanged. Separate disks are the cleaner way to use several buckets (each can have its own prefix, endpoint and credentials), but nothing needs to change in code that passes `bucket`.
+Use one disk per bucket: a disk has exactly one bucket (the `bucket` option), and each disk can have its own prefix, endpoint and credentials. The methods take no per-call `bucket` (it was removed in 0.8.0): inject the disk of the other bucket with `@InjectStorage('exports')` or get it with `storage.disk('exports')`.
 
 ### Copying between disks
 
@@ -425,6 +425,24 @@ StorageModule.forRootAsync({
 
 This package re-exports `StorageDisk`, `isStorageError` and all option and config types of the core (`StorageConfig`, `StorageModuleOptions`, `StorageDiskOptions`, `StorageMultiDiskOptions`, `StorageStats`, `StorageError`, `StorageErrorCode`, ...), so you do not need to import from `@webbar/node-multi-storage` yourself.
 
+## Custom drivers (experimental)
+
+A disk can be backed by your own `StorageDriver` (`type: 'custom'`), and any disk can be wrapped (`wrap`) to add encryption, read-only access or logging. The types flow through `forRoot` and `forRootAsync`. The interface is experimental in 0.8.x and may change in a minor release; it is documented in the [core README](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#custom-drivers-experimental).
+
+```ts
+import { StorageModule } from 'nestjs-multi-storage';
+
+StorageModule.forRoot({
+  default: 'local',
+  disks: {
+    local: { type: 'fileSystem', prefix: './data', wrap: (inner) => withLogging(inner) },
+    mine: { type: 'custom', driver: () => new MyDriver() }, // created on first use or in onModuleInit
+  },
+});
+```
+
+`StorageDriver`, `StorageCustomDiskOptions`, the `Driver*Options` types and the helpers `createFsError`, `createRmDirectoryError` and `createStats` are re-exported by this package.
+
 ## Lifecycle
 
 Nest handles it. `StorageService` extends the core `Storage` and calls `init()` in `onModuleInit` and `destroy()` in `onModuleDestroy`, so all disks are warmed up when the app starts (this creates the S3 clients) and their S3 clients and FTP / SFTP connections are closed on shutdown. `init()` is optional in any case: every disk also connects or creates its client on first use, which is why the `StorageService` of a testing module you only `compile()` (without `init()`) works too. If closing one disk fails on shutdown, the others are still closed and the first error is rethrown. `init()` and `destroy()` are public on `StorageService`, but you normally never call them; after `destroy()` the disks reconnect on the next operation. See [Lifecycle](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#lifecycle) in the core README.
@@ -469,9 +487,16 @@ describe('ReportService', () => {
 
 Memory mode behaves like `fileSystem` (same methods, options and Node-style errors, `prefix` escapes rejected, no signed URLs, nothing persisted); the known deviations are listed in the [core README](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#testing-with-the-memory-backend). For several disks, see [Testing with multiple disks](#testing-with-multiple-disks).
 
+## Upgrading from 0.7.x
+
+- **BREAKING:** the per-call `bucket` is removed (it was an option of every file method, the last parameter of `exists`, `rename` and `copyFile`, and `opts.bucket` of the signed URL methods). Configure one disk per bucket, see [Several buckets](#several-buckets). An s3 disk without `bucket` now fails when the module is set up.
+- Signed URL methods on non-S3 disks reject with `ERR_STORAGE_NOT_SUPPORTED`, `readdir` results are always sorted, `createReadStream` with `start > end` throws on every backend, and unknown encodings are rejected with `ERR_INVALID_ARG_VALUE`.
+
+See the [core changelog](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/CHANGELOG.md) for the details and the [CHANGELOG](CHANGELOG.md) for this package.
+
 ## Upgrading from 0.6.x
 
-The API is identical to 0.6.0: `StorageModule`, `StorageService`, `StorageDisk`, `@InjectStorage`, `getStorageToken`, `isStorageError` and all types are unchanged, and nothing in your code has to change. One thing does:
+Up to 0.7.0 the API was identical to 0.6.0: `StorageModule`, `StorageService`, `StorageDisk`, `@InjectStorage`, `getStorageToken`, `isStorageError` and all types are unchanged, and nothing in your code has to change. One thing does:
 
 - **BREAKING:** the AWS SDK is now an optional peer dependency instead of a regular one. If you use `type: 's3'`, install it yourself: `npm install @aws-sdk/client-s3 @aws-sdk/lib-storage @aws-sdk/s3-request-presigner`. Without them an s3 disk fails at startup with `type 's3' requires the optional peer dependencies "@aws-sdk/client-s3", "@aws-sdk/lib-storage" and "@aws-sdk/s3-request-presigner": npm install @aws-sdk/client-s3 @aws-sdk/lib-storage @aws-sdk/s3-request-presigner` (prefixed with `Storage disk "name": ` when you use several disks). Projects without S3 save about 150 packages and 20 MB of `node_modules`.
 - If you use TypeScript with `skipLibCheck: false` and no AWS SDK, install `@aws-sdk/client-s3` or set `skipLibCheck: true` (Nest's default), see the [core README](https://github.com/jonathanarezki/node-multi-storage/blob/main/packages/core/README.md#typescript-without-the-aws-sdk).

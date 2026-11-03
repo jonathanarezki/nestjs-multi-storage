@@ -11,23 +11,21 @@ import * as path from 'path';
 import * as stream from 'stream';
 import { PassThrough, Readable, Writable } from 'stream';
 import * as mime from 'mime-types';
-import {
-  StorageCreateReadStreamOptions,
-  StorageCreateWriteStreamOptions,
-  StorageMkdirOptions,
-  StorageModuleOptions,
-  StorageReaddirOptions,
-  StorageReadFileOptions,
-  StorageRmdirOptions,
-  StorageRmOptions,
-  StorageStats,
-  StorageWriteFileOptions,
-} from '../interfaces';
+import { StorageCreateWriteStreamOptions, StorageModuleOptions, StorageStats } from '../interfaces';
 import { StorageError } from '../storage-error';
-import { fsError, rmDirectoryError } from './fs-error';
-import { StorageDriver } from '../interfaces/storage-driver.interface';
-import { readdirOptions, readFileOptions, writeFileOptions } from './options';
-import { buildStats, defaultMode } from './stats';
+import { createFsError, createRmDirectoryError } from './fs-error';
+import {
+  DriverMkdirOptions,
+  DriverReaddirOptions,
+  DriverReadStreamOptions,
+  DriverRmdirOptions,
+  DriverRmOptions,
+  DriverSignedPutUrlOptions,
+  DriverSignedUrlOptions,
+  DriverWriteFileOptions,
+  StorageDriver,
+} from '../interfaces/storage-driver.interface';
+import { createStats, defaultMode } from './stats';
 
 // Largest object copied with a single CopyObject (S3 limit: 5 GiB), and the part size used above that
 const COPY_THRESHOLD = 5 * 1024 ** 3;
@@ -56,7 +54,7 @@ export class S3Driver implements StorageDriver {
   private readonly endpointCDN?: string;
   private readonly region?: string;
   private readonly forcePathStyle?: boolean;
-  private readonly bucket?: string;
+  private readonly bucket: string;
   private readonly accessKeyId?: string;
   private readonly secretAccessKey?: string;
 
@@ -91,6 +89,9 @@ export class S3Driver implements StorageDriver {
         ),
         { cause },
       );
+    }
+    if (!options.bucket) {
+      throw new Error(`type 's3' requires "bucket"`);
     }
     this.endpoint = options.endpoint;
     this.endpointCDN = options.endpointCDN;
@@ -139,36 +140,31 @@ export class S3Driver implements StorageDriver {
     }));
   }
 
-  /** Unlike `fs.promises.mkdir`, `recursive` defaults to `true`. */
-  async mkdir(folderPath: string, options?: StorageMkdirOptions): Promise<string | undefined> {
-    const recursive = options?.recursive ?? true;
-
-    const bucket = this.s3Bucket(options?.bucket);
-
-    const entry = await this.s3Entry(bucket, folderPath);
+  async mkdir(folderPath: string, { recursive }: DriverMkdirOptions): Promise<string | undefined> {
+    const entry = await this.s3Entry(folderPath);
     if (entry && 'file' in entry) {
-      throw fsError('EEXIST', 'mkdir', folderPath);
+      throw createFsError('EEXIST', 'mkdir', folderPath);
     }
     if (entry) {
       if (recursive) {
         return undefined;
       }
-      throw fsError('EEXIST', 'mkdir', folderPath);
+      throw createFsError('EEXIST', 'mkdir', folderPath);
     }
 
     if (!recursive) {
-      const parent = await this.s3Entry(bucket, path.dirname(folderPath));
+      const parent = await this.s3Entry(path.dirname(folderPath));
       if (!parent) {
-        throw fsError('ENOENT', 'mkdir', folderPath);
+        throw createFsError('ENOENT', 'mkdir', folderPath);
       }
       if ('file' in parent) {
-        throw fsError('ENOTDIR', 'mkdir', folderPath);
+        throw createFsError('ENOTDIR', 'mkdir', folderPath);
       }
     }
 
     await this.getClient().send(
       new this.sdk.PutObjectCommand({
-        Bucket: bucket,
+        Bucket: this.bucket,
         Key: this.normalizeDirKey(folderPath),
         Body: '',
         ContentLength: 0,
@@ -177,28 +173,21 @@ export class S3Driver implements StorageDriver {
     return undefined;
   }
 
-  async readdir(folderPath: string, options?: BufferEncoding | StorageReaddirOptions): Promise<string[]> {
-    const opts = readdirOptions(options);
-
-    const bucket = this.s3Bucket(opts.bucket);
-
+  async readdir(folderPath: string, { recursive }: DriverReaddirOptions): Promise<string[]> {
     const prefix = this.normalizeDirKey(folderPath);
-    const entry = await this.s3Entry(bucket, folderPath);
+    const entry = await this.s3Entry(folderPath);
     if (!entry) {
-      throw fsError('ENOENT', 'scandir', folderPath);
+      throw createFsError('ENOENT', 'scandir', folderPath);
     }
     if ('file' in entry) {
-      throw fsError('ENOTDIR', 'scandir', folderPath);
+      throw createFsError('ENOTDIR', 'scandir', folderPath);
     }
 
     const list = new Set<string>();
     const toName = (key?: string) => key?.slice(prefix.length).replace(/\/+$/, '') ?? '';
-    // Names are UTF-8 strings; another encoding re-encodes them like fs does
-    const encode = (name: string) =>
-      opts.encoding && !/^utf-?8$/i.test(opts.encoding) ? Buffer.from(name).toString(opts.encoding) : name;
 
-    if (opts.recursive) {
-      for await (const output of this.listObjects({ Bucket: bucket, Prefix: prefix })) {
+    if (recursive) {
+      for await (const output of this.listObjects({ Bucket: this.bucket, Prefix: prefix })) {
         for (const content of output.Contents ?? []) {
           const name = toName(content.Key);
           if (!name.length) {
@@ -212,10 +201,10 @@ export class S3Driver implements StorageDriver {
         }
       }
 
-      return [...list].sort().map(encode);
+      return [...list];
     }
 
-    for await (const output of this.listObjects({ Bucket: bucket, Delimiter: '/', Prefix: prefix })) {
+    for await (const output of this.listObjects({ Bucket: this.bucket, Delimiter: '/', Prefix: prefix })) {
       for (const key of [
         ...(output.Contents ?? []).map((content) => toName(content.Key)),
         ...(output.CommonPrefixes ?? []).map((commonPrefix) => toName(commonPrefix.Prefix)),
@@ -226,81 +215,62 @@ export class S3Driver implements StorageDriver {
       }
     }
 
-    return [...list].sort().map(encode);
+    return [...list];
   }
 
-  /** Unlike `fs.promises.rmdir`, `recursive` defaults to `true` (like `fs.promises.rm(path, { recursive: true })`). */
-  async rmdir(folderPath: string, options?: StorageRmdirOptions): Promise<void> {
-    const recursive = options?.recursive ?? true;
-
-    const bucket = this.s3Bucket(options?.bucket);
-
-    const entry = await this.s3Entry(bucket, folderPath);
+  async rmdir(folderPath: string, { recursive }: DriverRmdirOptions): Promise<void> {
+    const entry = await this.s3Entry(folderPath);
     if (!entry) {
-      throw fsError('ENOENT', recursive ? 'lstat' : 'rmdir', folderPath);
+      throw createFsError('ENOENT', recursive ? 'lstat' : 'rmdir', folderPath);
     }
 
     if ('file' in entry) {
       if (!recursive) {
-        throw fsError('ENOTDIR', 'rmdir', folderPath);
+        throw createFsError('ENOTDIR', 'rmdir', folderPath);
       }
       // fs.rm(path, { recursive: true }) removes a file as well
       await this.getClient().send(
-        new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(folderPath) }),
+        new this.sdk.DeleteObjectCommand({ Bucket: this.bucket, Key: this.normalizeKey(folderPath) }),
       );
       return;
     }
 
     if (recursive) {
-      return this.deleteTree(bucket, this.normalizeDirKey(folderPath));
+      return this.deleteTree(this.normalizeDirKey(folderPath));
     }
 
     const dirKey = this.normalizeDirKey(folderPath);
-    if (!(await this.isEmptyDir(bucket, dirKey))) {
-      throw fsError('ENOTEMPTY', 'rmdir', folderPath);
+    if (!(await this.isEmptyDir(dirKey))) {
+      throw createFsError('ENOTEMPTY', 'rmdir', folderPath);
     }
     // The bucket root has no marker object
     if (dirKey) {
-      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: dirKey }));
+      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: this.bucket, Key: dirKey }));
     }
   }
 
-  async stat(p: string, options?: { bucket?: string }): Promise<StorageStats> {
-    const bucket = this.s3Bucket(options?.bucket);
-
-    const entry = await this.s3Entry(bucket, p);
+  async stat(p: string): Promise<StorageStats> {
+    const entry = await this.s3Entry(p);
     if (!entry) {
-      throw fsError('ENOENT', 'stat', p);
+      throw createFsError('ENOENT', 'stat', p);
     }
 
     if ('file' in entry) {
       const { ContentLength, LastModified, ContentType, ETag } = entry.file;
       return {
-        ...buildStats({ mode: defaultMode(false), size: ContentLength ?? 0, mtime: LastModified ?? new Date(0) }),
+        ...createStats({ mode: defaultMode(false), size: ContentLength ?? 0, mtime: LastModified ?? new Date(0) }),
         contentType: ContentType,
         etag: ETag?.replace(/^"|"$/g, ''),
       };
     }
-    return buildStats({ mode: defaultMode(true), size: 0, mtime: entry.dir.mtime ?? new Date(0) });
+    return createStats({ mode: defaultMode(true), size: 0, mtime: entry.dir.mtime ?? new Date(0) });
   }
 
-  /**
-   * Unlike `fs.existsSync`, errors other than "not found" (403, network, ...) are thrown, not turned into `false`.
-   */
-  async exists(p: string, bucket?: string): Promise<boolean> {
-    return !!(await this.s3Entry(this.s3Bucket(bucket), p));
+  async exists(p: string): Promise<boolean> {
+    return !!(await this.s3Entry(p));
   }
 
-  async readFile(
-    filePath: string,
-    options: BufferEncoding | (StorageReadFileOptions & { encoding: BufferEncoding }),
-  ): Promise<string>;
-  async readFile(filePath: string, options?: (StorageReadFileOptions & { encoding?: null }) | null): Promise<Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer> {
-    const { bucket: optionsBucket, fsOptions } = readFileOptions(options);
-
-    const bucket = this.s3Bucket(optionsBucket);
+  async readFile(filePath: string): Promise<Buffer> {
     const key = this.normalizeKey(filePath);
 
     const streamToBuffer: (_stream: stream) => Promise<Buffer> = (_stream) => {
@@ -314,14 +284,13 @@ export class S3Driver implements StorageDriver {
 
     if (!key) {
       // The bucket root is no object key: nothing to GET
-      throw await this.missingFileError(bucket, filePath);
+      throw await this.missingFileError(filePath);
     }
 
-    let buffer: Buffer;
     if (this.endpoint && this.endpointCDN) {
       const result = await this.presigner.getSignedUrl(
         this.getClient() as any,
-        new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key }) as any,
+        new this.sdk.GetObjectCommand({ Bucket: this.bucket, Key: key }) as any,
         {
           expiresIn: 60,
         },
@@ -330,57 +299,44 @@ export class S3Driver implements StorageDriver {
         result.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, '')),
       );
       if (response.status === 404) {
-        throw await this.missingFileError(bucket, filePath);
+        throw await this.missingFileError(filePath);
       }
       if (!response.ok) {
         throw new Error(`Failed to read "${filePath}" from CDN: ${response.status} ${response.statusText}`);
       }
-      buffer = Buffer.from(await response.arrayBuffer());
+      return Buffer.from(await response.arrayBuffer());
     } else {
       try {
-        const data = await this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key }));
-        buffer = await streamToBuffer(data.Body as Readable);
+        const data = await this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: this.bucket, Key: key }));
+        return await streamToBuffer(data.Body as Readable);
       } catch (e: any) {
-        throw isMissingKey(e) ? await this.missingFileError(bucket, filePath) : e;
+        throw isMissingKey(e) ? await this.missingFileError(filePath) : e;
       }
     }
-
-    return fsOptions.encoding ? buffer.toString(fsOptions.encoding) : buffer;
   }
 
-  async writeFile(
-    filePath: string,
-    data: string | Buffer | Uint8Array,
-    options?: BufferEncoding | StorageWriteFileOptions,
-  ): Promise<void> {
-    const { encoding, bucket: optionsBucket, contentType } = writeFileOptions(options);
-
-    const bucket = this.s3Bucket(optionsBucket);
+  async writeFile(filePath: string, data: Buffer, { contentType }: DriverWriteFileOptions): Promise<void> {
     const key = this.writeKey(filePath, 'open');
 
     await this.getClient().send(
       new this.sdk.PutObjectCommand({
-        Bucket: bucket,
+        Bucket: this.bucket,
         Key: key,
-        Body: typeof data === 'string' ? Buffer.from(data, encoding) : data,
+        Body: data,
         ContentType: contentType || mime.lookup(filePath) || undefined,
       }),
     );
   }
 
-  public async getSignedUrl(
-    filePath: string,
-    opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string; responseContentType?: string },
-  ): Promise<string> {
-    const bucket = this.s3Bucket(opts?.bucket);
+  async getSignedUrl(filePath: string, opts: DriverSignedUrlOptions): Promise<string> {
     const command = new this.sdk.GetObjectCommand({
-      Bucket: bucket,
+      Bucket: this.bucket,
       Key: this.normalizeKey(filePath),
-      ResponseContentDisposition: opts?.responseContentDisposition,
-      ResponseContentType: opts?.responseContentType,
+      ResponseContentDisposition: opts.responseContentDisposition,
+      ResponseContentType: opts.responseContentType,
     });
 
-    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts?.expiresIn ?? 60 });
+    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts.expiresIn ?? 60 });
 
     if (this.endpointCDN && this.endpoint) {
       return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
@@ -388,18 +344,14 @@ export class S3Driver implements StorageDriver {
     return url;
   }
 
-  public async getSignedPutUrl(
-    filePath: string,
-    opts?: { bucket?: string; expiresIn?: number; contentType?: string },
-  ): Promise<string> {
-    const bucket = this.s3Bucket(opts?.bucket);
+  async getSignedPutUrl(filePath: string, opts: DriverSignedPutUrlOptions): Promise<string> {
     const command = new this.sdk.PutObjectCommand({
-      Bucket: bucket,
+      Bucket: this.bucket,
       Key: this.normalizeKey(filePath),
-      ContentType: opts?.contentType,
+      ContentType: opts.contentType,
     });
 
-    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts?.expiresIn ?? 60 });
+    const url = await this.presigner.getSignedUrl(this.getClient(), command, { expiresIn: opts.expiresIn ?? 60 });
 
     if (this.endpointCDN && this.endpoint) {
       return url.replace(this.endpoint.replace(/(^\w+:|^)\/\//, ''), this.endpointCDN.replace(/(^\w+:|^)\/\//, ''));
@@ -407,81 +359,77 @@ export class S3Driver implements StorageDriver {
     return url;
   }
 
-  async rm(filePath: string, options?: StorageRmOptions): Promise<void> {
-    const bucket = this.s3Bucket(options?.bucket);
-
-    const entry = await this.s3Entry(bucket, filePath);
+  async rm(filePath: string, options: DriverRmOptions): Promise<void> {
+    const entry = await this.s3Entry(filePath);
     if (!entry) {
-      if (options?.force) {
+      if (options.force) {
         return;
       }
-      throw fsError('ENOENT', 'lstat', filePath);
+      throw createFsError('ENOENT', 'lstat', filePath);
     }
 
     if ('dir' in entry) {
-      if (!options?.recursive) {
-        throw rmDirectoryError(filePath);
+      if (!options.recursive) {
+        throw createRmDirectoryError(filePath);
       }
-      return this.deleteTree(bucket, this.normalizeDirKey(filePath));
+      return this.deleteTree(this.normalizeDirKey(filePath));
     }
 
-    await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: this.normalizeKey(filePath) }));
+    await this.getClient().send(
+      new this.sdk.DeleteObjectCommand({ Bucket: this.bucket, Key: this.normalizeKey(filePath) }),
+    );
   }
 
-  async copyFile(src: string, dest: string, mode?: number, bucket?: string): Promise<void> {
-    bucket = this.s3Bucket(bucket);
-
+  async copyFile(src: string, dest: string, mode: number): Promise<void> {
     // The two lookups run in parallel. Their results are used in the order fs would report the errors.
-    const destIsFolder = this.isFolder(bucket, dest);
-    const entry = await this.s3Source(bucket, src);
+    const destIsFolder = this.isFolder(dest);
+    const entry = await this.s3Source(src);
     if (!entry) {
-      throw fsError('ENOENT', 'copyfile', src, dest);
+      throw createFsError('ENOENT', 'copyfile', src, dest);
     }
     if ('dir' in entry) {
-      throw fsError('EISDIR', 'copyfile', src, dest);
+      throw createFsError('EISDIR', 'copyfile', src, dest);
     }
 
     const srcKey = this.normalizeKey(src);
     const destKey = this.writeKey(src, 'copyfile', dest);
-    const exclusive = !!((mode ?? 0) & fs.constants.COPYFILE_EXCL);
+    const exclusive = !!(mode & fs.constants.COPYFILE_EXCL);
     if (srcKey === destKey) {
       if (exclusive) {
-        throw fsError('EEXIST', 'copyfile', src, dest);
+        throw createFsError('EEXIST', 'copyfile', src, dest);
       }
       return;
     }
 
     if (await destIsFolder) {
-      throw fsError('EISDIR', 'copyfile', src, dest);
+      throw createFsError('EISDIR', 'copyfile', src, dest);
     }
 
     // Not atomic on its own. Some S3-compatible servers ignore IfNoneMatch on copies (or mishandle a failed
     // conditional multipart completion), so check up front as well; IfNoneMatch still guards against races on AWS.
-    if (exclusive && (await this.headObject(bucket, destKey))) {
-      throw fsError('EEXIST', 'copyfile', src, dest);
+    if (exclusive && (await this.headObject(destKey))) {
+      throw createFsError('EEXIST', 'copyfile', src, dest);
     }
 
     try {
-      await this.copyObject(srcKey, destKey, entry.file.size, bucket, {
+      await this.copyObject(srcKey, destKey, entry.file.size, {
         exclusive,
         storageClass: entry.file.storageClass,
       });
     } catch (e: any) {
       if (e?.$metadata?.httpStatusCode === 412) {
-        throw fsError('EEXIST', 'copyfile', src, dest);
+        throw createFsError('EEXIST', 'copyfile', src, dest);
       }
       throw e;
     }
   }
 
-  async rename(oldPath: string, newPath: string, bucket?: string): Promise<void> {
-    bucket = this.s3Bucket(bucket);
-
+  async rename(oldPath: string, newPath: string): Promise<void> {
     // The two lookups run in parallel. Their results are used in the order fs would report the errors.
-    const destIsFolder = this.isFolder(bucket, newPath);
-    const entry = await this.s3Source(bucket, oldPath);
+    const destIsFolder = this.isFolder(newPath);
+    const entry = await this.s3Source(oldPath);
     if (!entry) {
-      throw fsError('ENOENT', 'rename', oldPath, newPath);
+      throw createFsError('ENOENT', 'rename', oldPath, newPath);
     }
 
     if ('file' in entry) {
@@ -492,13 +440,13 @@ export class S3Driver implements StorageDriver {
       }
 
       if (await destIsFolder) {
-        throw fsError('EISDIR', 'rename', oldPath, newPath);
+        throw createFsError('EISDIR', 'rename', oldPath, newPath);
       }
 
-      await this.copyObject(srcKey, destKey, entry.file.size, bucket, {
+      await this.copyObject(srcKey, destKey, entry.file.size, {
         storageClass: entry.file.storageClass,
       });
-      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: bucket, Key: srcKey }));
+      await this.getClient().send(new this.sdk.DeleteObjectCommand({ Bucket: this.bucket, Key: srcKey }));
       return;
     }
 
@@ -508,51 +456,45 @@ export class S3Driver implements StorageDriver {
       return;
     }
     if (destDir.startsWith(srcDir)) {
-      throw fsError('EINVAL', 'rename', oldPath, newPath);
+      throw createFsError('EINVAL', 'rename', oldPath, newPath);
     }
 
-    const target = await this.s3Entry(bucket, newPath);
+    const target = await this.s3Entry(newPath);
     if (target && 'file' in target) {
-      throw fsError('ENOTDIR', 'rename', oldPath, newPath);
+      throw createFsError('ENOTDIR', 'rename', oldPath, newPath);
     }
     if (target) {
-      if (!(await this.isEmptyDir(bucket, destDir))) {
-        throw fsError('ENOTEMPTY', 'rename', oldPath, newPath);
+      if (!(await this.isEmptyDir(destDir))) {
+        throw createFsError('ENOTEMPTY', 'rename', oldPath, newPath);
       }
     }
 
-    const copied = await this.copyTree(bucket, srcDir, destDir, !!target);
+    const copied = await this.copyTree(srcDir, destDir, !!target);
 
     // Not atomic: a failure here leaves the folder at both places, and nothing is rolled back
-    await this.deleteKeys(bucket, copied);
+    await this.deleteKeys(copied);
   }
 
-  createReadStream(filePath: string, options?: StorageCreateReadStreamOptions): Readable {
-    const { bucket: optionsBucket } = options ?? {};
-
-    const bucket = this.s3Bucket(optionsBucket);
+  createReadStream(filePath: string, options: DriverReadStreamOptions): Readable {
     const key = this.normalizeKey(filePath);
 
     const Range =
-      typeof options?.start === 'number' || typeof options?.end === 'number'
-        ? `bytes=${options?.start ?? 0}-${typeof options?.end === 'number' ? options.end : ''}`
+      typeof options.start === 'number' || typeof options.end === 'number'
+        ? `bytes=${options.start ?? 0}-${typeof options.end === 'number' ? options.end : ''}`
         : undefined;
 
-    const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
-    if (options?.encoding) {
-      pass.setEncoding(options.encoding);
-    }
+    const pass = new PassThrough({ highWaterMark: options.highWaterMark });
 
     // The bucket root is no object key: nothing to GET
     const request = key
-      ? this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: bucket, Key: key, Range }))
+      ? this.getClient().send(new this.sdk.GetObjectCommand({ Bucket: this.bucket, Key: key, Range }))
       : Promise.reject({ name: 'NoSuchKey' });
     request
       .then(({ Body }) => (Body as Readable).pipe(pass))
       .catch(async (err) => {
         try {
           // Node's stream error for a folder carries no path
-          pass.destroy(isMissingKey(err) ? await this.missingFileError(bucket, filePath, false) : err);
+          pass.destroy(isMissingKey(err) ? await this.missingFileError(filePath, false) : err);
         } catch (lookupError) {
           pass.destroy(lookupError as Error);
         }
@@ -561,21 +503,20 @@ export class S3Driver implements StorageDriver {
     return pass;
   }
 
-  createWriteStream(filePath: string, options?: StorageCreateWriteStreamOptions): Writable {
-    const bucket = this.s3Bucket(options?.bucket);
+  createWriteStream(filePath: string, options: StorageCreateWriteStreamOptions): Writable {
     const key = this.writeKey(filePath, 'open');
 
-    const pass = new PassThrough({ highWaterMark: options?.highWaterMark });
+    const pass = new PassThrough({ highWaterMark: options.highWaterMark });
     const upload = new this.libStorage.Upload({
       client: this.getClient(),
       params: {
-        Bucket: bucket,
+        Bucket: this.bucket,
         Key: key,
         Body: pass,
-        ContentType: options?.contentType || mime.lookup(filePath) || undefined,
+        ContentType: options.contentType || mime.lookup(filePath) || undefined,
       },
-      queueSize: options?.queueSize ?? 4,
-      partSize: Math.max(options?.partSize ?? 5 * 1024 * 1024, 5 * 1024 * 1024),
+      queueSize: options.queueSize ?? 4,
+      partSize: Math.max(options.partSize ?? 5 * 1024 * 1024, 5 * 1024 * 1024),
       leavePartsOnError: false,
     });
 
@@ -586,8 +527,8 @@ export class S3Driver implements StorageDriver {
 
     // 'finish' is only emitted once the upload has completed, like fs.WriteStream after the file is flushed
     const writable = new Writable({
-      highWaterMark: options?.highWaterMark,
-      defaultEncoding: options?.encoding,
+      highWaterMark: options.highWaterMark,
+      defaultEncoding: options.encoding,
       write(chunk, encoding, callback) {
         if (pass.write(chunk, encoding)) {
           callback();
@@ -615,35 +556,24 @@ export class S3Driver implements StorageDriver {
 
   // --- lookups ---
 
-  private s3Bucket(bucket?: string): string {
-    const resolved = bucket ?? this.bucket;
-    if (!resolved) {
-      throw new Error('No bucket configured: pass a bucket or set the bucket option');
-    }
-    return resolved;
-  }
-
   /** Resolves what lives at `p`: a file (object), a folder (marker and/or objects under the prefix) or nothing. */
-  private async s3Entry(
-    bucket: string | undefined,
-    p: string,
-  ): Promise<{ file: HeadObjectCommandOutput } | { dir: { mtime?: Date } } | undefined> {
+  private async s3Entry(p: string): Promise<{ file: HeadObjectCommandOutput } | { dir: { mtime?: Date } } | undefined> {
     const dirKey = this.normalizeDirKey(p);
     if (dirKey === this.normalizeDirKey('')) {
       // The root always exists, but a missing bucket must not look like an empty one
-      await this.listObjects({ Bucket: bucket, Prefix: dirKey, MaxKeys: 1 }).next();
+      await this.listObjects({ Bucket: this.bucket, Prefix: dirKey, MaxKeys: 1 }).next();
       return { dir: {} };
     }
 
     // The bucket root normalizes to the empty key, which is no object (a HEAD on it would hit the bucket itself)
     const fileKey = this.normalizeKey(p);
-    const file = fileKey ? await this.headObject(bucket, fileKey) : undefined;
+    const file = fileKey ? await this.headObject(fileKey) : undefined;
     if (file) {
       return { file };
     }
 
     // One LIST for marker and implicit folder: the marker key is the shortest key with this prefix, so it sorts first
-    const first = await this.listFirst(bucket, dirKey);
+    const first = await this.listFirst(dirKey);
     if (!first) {
       return undefined;
     }
@@ -654,8 +584,8 @@ export class S3Driver implements StorageDriver {
    * Whether `p` is a folder (marker or implicit): any key below it. A failure (an invalid path, ...) only surfaces when
    * the result is awaited, which is what lets callers start this lookup early and still report errors in fs order.
    */
-  private isFolder(bucket: string | undefined, p: string): Promise<boolean> {
-    const lookup = (async () => !!(await this.listFirst(bucket, this.normalizeDirKey(p))))();
+  private isFolder(p: string): Promise<boolean> {
+    const lookup = (async () => !!(await this.listFirst(this.normalizeDirKey(p))))();
     lookup.catch(() => undefined);
     return lookup;
   }
@@ -666,17 +596,16 @@ export class S3Driver implements StorageDriver {
    * a missing path, the bucket root) falls back to `s3Entry`.
    */
   private async s3Source(
-    bucket: string | undefined,
     p: string,
   ): Promise<{ file: { size: number; storageClass?: string } } | { dir: { mtime?: Date } } | undefined> {
     const key = this.normalizeKey(p);
     if (key) {
-      const first = await this.listFirst(bucket, key);
+      const first = await this.listFirst(key);
       if (first?.Key === key) {
         return { file: { size: first.Size ?? 0, storageClass: first.StorageClass } };
       }
     }
-    const entry = await this.s3Entry(bucket, p);
+    const entry = await this.s3Entry(p);
     if (entry && 'file' in entry) {
       return { file: { size: entry.file.ContentLength ?? 0, storageClass: entry.file.StorageClass } };
     }
@@ -684,20 +613,20 @@ export class S3Driver implements StorageDriver {
   }
 
   /** A folder that only consists of its marker (or of nothing) is empty. */
-  private async isEmptyDir(bucket: string, dirKey: string): Promise<boolean> {
-    for await (const output of this.listObjects({ Bucket: bucket, Prefix: dirKey, MaxKeys: 2 })) {
+  private async isEmptyDir(dirKey: string): Promise<boolean> {
+    for await (const output of this.listObjects({ Bucket: this.bucket, Prefix: dirKey, MaxKeys: 2 })) {
       return !(output.Contents ?? []).some((content) => content.Key !== dirKey);
     }
     return true;
   }
 
   /** What reading `p` fails with after GetObject found no such key: EISDIR for a folder (like Node), else ENOENT. */
-  private async missingFileError(bucket: string, p: string, withPath = true) {
-    const entry = await this.s3Entry(bucket, p);
+  private async missingFileError(p: string, withPath = true) {
+    const entry = await this.s3Entry(p);
     if (entry && 'dir' in entry) {
-      return fsError('EISDIR', 'read', withPath ? p : undefined);
+      return createFsError('EISDIR', 'read', withPath ? p : undefined);
     }
-    return fsError('ENOENT', 'open', p);
+    return createFsError('ENOENT', 'open', p);
   }
 
   // --- keys ---
@@ -752,7 +681,7 @@ export class S3Driver implements StorageDriver {
   private writeKey(p: string, syscall: string, dest?: string) {
     const key = this.normalizeKey(dest ?? p);
     if (!key || this.normalizeDirKey(dest ?? p) === this.normalizeDirKey('')) {
-      throw fsError('EISDIR', syscall, p, dest);
+      throw createFsError('EISDIR', syscall, p, dest);
     }
     return key;
   }
@@ -768,9 +697,9 @@ export class S3Driver implements StorageDriver {
     } while (ContinuationToken);
   }
 
-  private async headObject(bucket: string | undefined, key: string): Promise<HeadObjectCommandOutput | undefined> {
+  private async headObject(key: string): Promise<HeadObjectCommandOutput | undefined> {
     try {
-      return await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: bucket, Key: key }));
+      return await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: this.bucket, Key: key }));
     } catch (e: any) {
       if (isNotFound(e)) {
         return undefined;
@@ -780,9 +709,9 @@ export class S3Driver implements StorageDriver {
   }
 
   /** The first object key (UTF-8 byte order) that starts with `prefix`, if any. */
-  private async listFirst(bucket: string | undefined, prefix: string) {
+  private async listFirst(prefix: string) {
     const output = await this.getClient().send(
-      new this.sdk.ListObjectsV2Command({ Bucket: bucket, Prefix: prefix, MaxKeys: 1 }),
+      new this.sdk.ListObjectsV2Command({ Bucket: this.bucket, Prefix: prefix, MaxKeys: 1 }),
     );
     return output.Contents?.[0];
   }
@@ -790,9 +719,9 @@ export class S3Driver implements StorageDriver {
   // --- delete ---
 
   /** Deletes every object below the folder key, marker included. Nothing to delete is not an error. */
-  private async deleteTree(bucket: string, dirKey: string): Promise<void> {
+  private async deleteTree(dirKey: string): Promise<void> {
     // A page holds at most 1000 keys, which is also the DeleteObjects limit
-    for await (const output of this.listObjects({ Bucket: bucket, Prefix: dirKey })) {
+    for await (const output of this.listObjects({ Bucket: this.bucket, Prefix: dirKey })) {
       const keys = (output.Contents ?? []).flatMap((content) => (content.Key ? [content.Key] : []));
       if (!keys.length) {
         continue;
@@ -800,7 +729,7 @@ export class S3Driver implements StorageDriver {
 
       const result = await this.getClient().send(
         new this.sdk.DeleteObjectsCommand({
-          Bucket: bucket,
+          Bucket: this.bucket,
           Delete: { Objects: keys.map((key) => ({ Key: key })), Quiet: true },
         }),
       );
@@ -822,11 +751,11 @@ export class S3Driver implements StorageDriver {
    * destination keys written by this call are removed again. An existing (empty) destination folder keeps its
    * marker: it is not ours, and the copy of the source marker would only have rewritten it.
    */
-  private async copyTree(bucket: string, srcDir: string, destDir: string, destExists: boolean): Promise<string[]> {
+  private async copyTree(srcDir: string, destDir: string, destExists: boolean): Promise<string[]> {
     const copied: string[] = [];
     const written: string[] = [];
     try {
-      for await (const output of this.listObjects({ Bucket: bucket, Prefix: srcDir })) {
+      for await (const output of this.listObjects({ Bucket: this.bucket, Prefix: srcDir })) {
         const objects = (output.Contents ?? []).flatMap((content) =>
           content.Key ? [{ key: content.Key, size: content.Size ?? 0, storageClass: content.StorageClass }] : [],
         );
@@ -842,7 +771,7 @@ export class S3Driver implements StorageDriver {
               written.push(destKey);
             }
             try {
-              await this.copyObject(key, destKey, size, bucket, { storageClass });
+              await this.copyObject(key, destKey, size, { storageClass });
             } catch (e) {
               failed = true;
               throw e;
@@ -861,7 +790,7 @@ export class S3Driver implements StorageDriver {
       }
     } catch (error) {
       try {
-        await this.deleteKeys(bucket, written, true);
+        await this.deleteKeys(written, true);
       } catch (cleanupError) {
         // Keep the original error, but do not lose the failed cleanup
         if (typeof error === 'object' && error !== null) {
@@ -877,13 +806,13 @@ export class S3Driver implements StorageDriver {
    * Deletes exactly these keys in DeleteObjects batches of 1000 and throws on the first failure. With `bestEffort`,
    * the remaining batches are still attempted before the first failure is thrown.
    */
-  private async deleteKeys(bucket: string, keys: string[], bestEffort = false): Promise<void> {
+  private async deleteKeys(keys: string[], bestEffort = false): Promise<void> {
     let failure: { error: unknown } | undefined;
     for (let i = 0; i < keys.length; i += 1000) {
       try {
         const result = await this.getClient().send(
           new this.sdk.DeleteObjectsCommand({
-            Bucket: bucket,
+            Bucket: this.bucket,
             Delete: { Objects: keys.slice(i, i + 1000).map((key) => ({ Key: key })), Quiet: true },
           }),
         );
@@ -909,10 +838,9 @@ export class S3Driver implements StorageDriver {
     srcKey: string,
     destKey: string,
     size: number,
-    bucket: string | undefined,
     opts?: { exclusive?: boolean; storageClass?: string },
   ): Promise<void> {
-    const CopySource = `${bucket}/${srcKey.split('/').map(encodeURIComponent).join('/')}`;
+    const CopySource = `${this.bucket}/${srcKey.split('/').map(encodeURIComponent).join('/')}`;
     // Fails with 412 when the destination exists. Without IfNoneMatch this check would not be atomic.
     const IfNoneMatch = opts?.exclusive ? '*' : undefined;
 
@@ -924,7 +852,7 @@ export class S3Driver implements StorageDriver {
       // ContentType, metadata and tags are copied by default
       await this.getClient().send(
         new this.sdk.CopyObjectCommand({
-          Bucket: bucket,
+          Bucket: this.bucket,
           Key: destKey,
           CopySource,
           IfNoneMatch,
@@ -934,11 +862,11 @@ export class S3Driver implements StorageDriver {
       return;
     }
 
-    const head = await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: bucket, Key: srcKey }));
-    const Tagging = await this.getTagging(bucket, srcKey);
+    const head = await this.getClient().send(new this.sdk.HeadObjectCommand({ Bucket: this.bucket, Key: srcKey }));
+    const Tagging = await this.getTagging(srcKey);
     const { UploadId } = await this.getClient().send(
       new this.sdk.CreateMultipartUploadCommand({
-        Bucket: bucket,
+        Bucket: this.bucket,
         Key: destKey,
         ContentType: head.ContentType,
         ContentDisposition: head.ContentDisposition,
@@ -959,7 +887,7 @@ export class S3Driver implements StorageDriver {
         const end = Math.min(start + partSize, size) - 1;
         const part = await this.getClient().send(
           new this.sdk.UploadPartCopyCommand({
-            Bucket: bucket,
+            Bucket: this.bucket,
             Key: destKey,
             UploadId,
             PartNumber: partNumber,
@@ -972,7 +900,7 @@ export class S3Driver implements StorageDriver {
 
       await this.getClient().send(
         new this.sdk.CompleteMultipartUploadCommand({
-          Bucket: bucket,
+          Bucket: this.bucket,
           Key: destKey,
           UploadId,
           MultipartUpload: { Parts: parts },
@@ -981,7 +909,7 @@ export class S3Driver implements StorageDriver {
       );
     } catch (e) {
       await this.getClient()
-        .send(new this.sdk.AbortMultipartUploadCommand({ Bucket: bucket, Key: destKey, UploadId }))
+        .send(new this.sdk.AbortMultipartUploadCommand({ Bucket: this.bucket, Key: destKey, UploadId }))
         .catch(() => undefined);
       throw e;
     }
@@ -991,10 +919,10 @@ export class S3Driver implements StorageDriver {
    * The tags of an object as a URL-encoded query string, for CreateMultipartUpload (UploadPartCopy cannot copy them).
    * Without `s3:GetObjectTagging`, or on a provider without tagging, the copy goes on without tags.
    */
-  private async getTagging(bucket: string | undefined, key: string): Promise<string | undefined> {
+  private async getTagging(key: string): Promise<string | undefined> {
     try {
       const { TagSet } = await this.getClient().send(
-        new this.sdk.GetObjectTaggingCommand({ Bucket: bucket, Key: key }),
+        new this.sdk.GetObjectTaggingCommand({ Bucket: this.bucket, Key: key }),
       );
       return (
         TagSet?.map(({ Key, Value }) => `${encodeURIComponent(Key ?? '')}=${encodeURIComponent(Value ?? '')}`).join(

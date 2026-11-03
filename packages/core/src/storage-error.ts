@@ -11,9 +11,10 @@ export const FS_ERRORS = {
 
 /**
  * The error codes every backend reports: they come from Node (fileSystem) or memfs (memory), or are emulated by the
- * s3, ftp and sftp drivers (the fileSystem and memory backends may report others).
+ * s3, ftp and sftp drivers (the fileSystem and memory backends may report others). `ERR_STORAGE_NOT_SUPPORTED` is
+ * thrown by `StorageDisk` for an operation the disk's driver does not implement (signed URLs on most backends).
  */
-export type StorageErrorCode = keyof typeof FS_ERRORS | 'ERR_FS_EISDIR';
+export type StorageErrorCode = keyof typeof FS_ERRORS | 'ERR_FS_EISDIR' | 'ERR_STORAGE_NOT_SUPPORTED';
 
 /**
  * What every backend throws for a filesystem-level failure: Node-style errors with a string `code`.

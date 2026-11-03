@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
+import { createStorage } from '@webbar/node-multi-storage';
 import { StorageDisk, StorageModule, StorageService } from 'nestjs-multi-storage';
 import {
   collect,
@@ -328,12 +329,6 @@ describeBackends('exists and copyFile edge cases', (backend) => {
     expect(await service.readFile('a.txt', 'utf8')).toBe('x');
   });
 
-  it('stat accepts an options object', async () => {
-    const { service } = h.ctx;
-    await put(service, 'a.txt', 'x');
-    expect((await service.stat('a.txt', {})).isFile()).toBe(true);
-  });
-
   it('createReadStream on a missing file emits ENOENT (open)', async () => {
     const { service, errPath } = h.ctx;
     await expectFsError(collect(service.createReadStream('missing.txt')), {
@@ -345,54 +340,50 @@ describeBackends('exists and copyFile edge cases', (backend) => {
   });
 });
 
-describeS3('bucket in the options object (S3)', () => {
-  const BAD = { bucket: 'no-such-bucket' };
-
-  it('every changed method addresses the bucket from its options', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'bucket-options', { overrides: { bucket: undefined } });
+describeS3('the bucket of the disk (S3)', () => {
+  it('every method addresses the configured bucket', async () => {
+    const ctx = await createCtx(S3_BACKEND, 'bucket-own', { overrides: { bucket: S3_BUCKET } });
     try {
       const { service } = ctx;
-      const own = { bucket: S3_BUCKET };
-      await service.writeFile('d/a.txt', 'hello', { ...own, contentType: 'text/x-own' });
-      await service.mkdir('m', own);
-      await expect(service.mkdir('m2/n', { ...own, recursive: false })).rejects.toMatchObject({ code: 'ENOENT' });
-      expect(await service.readFile('d/a.txt', { ...own, encoding: 'utf8' })).toBe('hello');
-      expect(await service.readdir('d', own)).toEqual(['a.txt']);
-      expect(await service.readdir('', { ...own, recursive: true })).toContain('d/a.txt');
-      expect((await service.stat('d/a.txt', own)).contentType).toBe('text/x-own');
-      expect(await service.exists('d/a.txt', S3_BUCKET)).toBe(true);
-      expect((await collect(service.createReadStream('d/a.txt', { ...own, start: 1, end: 2 }))).toString()).toBe('el');
+      await service.writeFile('d/a.txt', 'hello', { contentType: 'text/x-own' });
+      await service.mkdir('m');
+      await expect(service.mkdir('m2/n', { recursive: false })).rejects.toMatchObject({ code: 'ENOENT' });
+      expect(await service.readFile('d/a.txt', { encoding: 'utf8' })).toBe('hello');
+      expect(await service.readdir('d')).toEqual(['a.txt']);
+      expect(await service.readdir('', { recursive: true })).toContain('d/a.txt');
+      expect((await service.stat('d/a.txt')).contentType).toBe('text/x-own');
+      expect(await service.exists('d/a.txt')).toBe(true);
+      expect((await collect(service.createReadStream('d/a.txt', { start: 1, end: 2 }))).toString()).toBe('el');
       await new Promise<void>((resolve, reject) => {
-        const ws = service.createWriteStream('d/w.txt', own);
+        const ws = service.createWriteStream('d/w.txt');
         ws.on('error', reject).on('finish', () => resolve());
         ws.end('w');
       });
-      await service.copyFile('d/w.txt', 'd/w2.txt', undefined, S3_BUCKET);
-      await service.rename('d/w2.txt', 'd/w3.txt', S3_BUCKET);
-      await service.rm('d/w3.txt', own);
-      await service.rmdir('m', own);
-      await service.rm('d', { ...own, recursive: true });
-      expect(await service.exists('d', S3_BUCKET)).toBe(false);
-    } finally {
-      await ctx.service.rm('', { bucket: S3_BUCKET, recursive: true }).catch(() => undefined);
-      await ctx.moduleRef.close();
-    }
-  });
-
-  it('a nonexistent bucket in the options rejects', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'bucket-bad');
-    try {
-      const { service } = ctx;
-      await expect(put(service, 'a.txt', 'x', BAD)).rejects.toThrow();
-      await expect(service.readFile('a.txt', BAD)).rejects.toThrow();
-      await expect(collect(service.createReadStream('a.txt', BAD))).rejects.toThrow();
-      await expect(service.readdir('d', BAD)).rejects.toThrow();
+      await service.copyFile('d/w.txt', 'd/w2.txt');
+      await service.rename('d/w2.txt', 'd/w3.txt');
+      await service.rm('d/w3.txt');
+      await service.rmdir('m');
+      await service.rm('d', { recursive: true });
+      expect(await service.exists('d')).toBe(false);
     } finally {
       await ctx.close();
     }
   });
 
-  it('a string in an options position is an encoding, not a bucket', async () => {
+  it('a disk with a nonexistent bucket rejects', async () => {
+    const ctx = await createCtx(S3_BACKEND, 'bucket-bad', { overrides: { bucket: 'no-such-bucket' } });
+    try {
+      const { service } = ctx;
+      await expect(put(service, 'a.txt', 'x')).rejects.toThrow();
+      await expect(service.readFile('a.txt')).rejects.toThrow();
+      await expect(collect(service.createReadStream('a.txt'))).rejects.toThrow();
+      await expect(service.readdir('d')).rejects.toThrow();
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it('a string in an options position is an encoding', async () => {
     const ctx = await createCtx(S3_BACKEND, 'bucket-string');
     try {
       await ctx.service.writeFile('a.txt', 'hi');
@@ -403,28 +394,11 @@ describeS3('bucket in the options object (S3)', () => {
     }
   });
 
-  it('without any bucket every method fails with a clear error', async () => {
-    const ctx = await createCtx(S3_BACKEND, 'no-bucket', { overrides: { bucket: undefined } });
-    try {
-      const { service } = ctx;
-      const message = 'No bucket configured: pass a bucket or set the bucket option';
-      await expect(put(service, 'a.txt', 'x')).rejects.toThrow(message);
-      await expect(service.readFile('a.txt')).rejects.toThrow(message);
-      await expect(service.readdir('')).rejects.toThrow(message);
-      await expect(service.mkdir('d')).rejects.toThrow(message);
-      await expect(service.rmdir('d')).rejects.toThrow(message);
-      await expect(service.rm('a.txt')).rejects.toThrow(message);
-      await expect(service.stat('a.txt')).rejects.toThrow(message);
-      await expect(service.exists('a.txt')).rejects.toThrow(message);
-      await expect(service.copyFile('a.txt', 'b.txt')).rejects.toThrow(message);
-      await expect(service.rename('a.txt', 'b.txt')).rejects.toThrow(message);
-      await expect(service.getSignedUrl('a.txt')).rejects.toThrow(message);
-      await expect(service.getSignedPutUrl('a.txt')).rejects.toThrow(message);
-      expect(() => service.createReadStream('a.txt')).toThrow(message);
-      expect(() => service.createWriteStream('a.txt')).toThrow(message);
-    } finally {
-      await ctx.moduleRef.close();
-    }
+  it('a disk without a bucket is rejected when it is created', async () => {
+    expect(() => createStorage(s3Options('x', { bucket: undefined }))).toThrow(`type 's3' requires "bucket"`);
+    expect(() => createStorage({ default: 'a', disks: { a: s3Options('x', { bucket: undefined }) } })).toThrow(
+      `Storage disk "a": type 's3' requires "bucket"`,
+    );
   });
 });
 

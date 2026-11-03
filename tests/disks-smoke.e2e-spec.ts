@@ -26,8 +26,8 @@ interface StorageService051 {
     options?: BufferEncoding | import('nestjs-multi-storage').StorageReaddirOptions,
   ): Promise<string[]>;
   rmdir(folderPath: string, options?: import('nestjs-multi-storage').StorageRmdirOptions): Promise<void>;
-  stat(p: string, options?: { bucket?: string }): Promise<import('nestjs-multi-storage').StorageStats>;
-  exists(p: string, bucket?: string): Promise<boolean>;
+  stat(p: string): Promise<import('nestjs-multi-storage').StorageStats>;
+  exists(p: string): Promise<boolean>;
   readFile(
     filePath: string,
     options: BufferEncoding | (import('nestjs-multi-storage').StorageReadFileOptions & { encoding: BufferEncoding }),
@@ -47,15 +47,12 @@ interface StorageService051 {
   ): Promise<void>;
   getSignedUrl(
     filePath: string,
-    opts?: { bucket?: string; expiresIn?: number; responseContentDisposition?: string; responseContentType?: string },
+    opts?: { expiresIn?: number; responseContentDisposition?: string; responseContentType?: string },
   ): Promise<string>;
-  getSignedPutUrl(
-    filePath: string,
-    opts?: { bucket?: string; expiresIn?: number; contentType?: string },
-  ): Promise<string>;
+  getSignedPutUrl(filePath: string, opts?: { expiresIn?: number; contentType?: string }): Promise<string>;
   rm(filePath: string, options?: import('nestjs-multi-storage').StorageRmOptions): Promise<void>;
-  copyFile(src: string, dest: string, mode?: number, bucket?: string): Promise<void>;
-  rename(oldPath: string, newPath: string, bucket?: string): Promise<void>;
+  copyFile(src: string, dest: string, mode?: number): Promise<void>;
+  rename(oldPath: string, newPath: string): Promise<void>;
   createReadStream(filePath: string, options?: import('nestjs-multi-storage').StorageCreateReadStreamOptions): Readable;
   createWriteStream(
     filePath: string,
@@ -63,7 +60,7 @@ interface StorageService051 {
   ): Writable;
 }
 
-// Compile-time checks (ts-jest reports type errors): nothing from 0.5.1 is removed or narrowed.
+// Compile-time checks (ts-jest reports type errors): nothing from 0.5.1 is removed or narrowed, except the per-call `bucket` (removed in 0.8.0).
 function typeChecks(service: StorageService) {
   const compatible: StorageService051 = service;
   const asDisk: StorageDisk = service;

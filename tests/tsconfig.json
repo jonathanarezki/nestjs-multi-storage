@@ -10,6 +10,7 @@
     "baseUrl": "..",
     "paths": {
       "@webbar/node-multi-storage": ["packages/core/src"],
+      "@webbar/node-multi-storage/testing": ["packages/core/src/testing"],
       "nestjs-multi-storage": ["packages/nestjs/src"]
     }
   },

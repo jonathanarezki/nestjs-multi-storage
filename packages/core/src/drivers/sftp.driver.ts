@@ -4,23 +4,20 @@ import { connect as tcpConnect, Socket } from 'net';
 import * as path from 'path';
 import { PassThrough, Readable, Writable } from 'stream';
 import { pipeline } from 'stream/promises';
+import { StorageCreateWriteStreamOptions, StorageModuleOptions, StorageStats } from '../interfaces';
 import {
-  StorageCreateReadStreamOptions,
-  StorageCreateWriteStreamOptions,
-  StorageMkdirOptions,
-  StorageModuleOptions,
-  StorageReaddirOptions,
-  StorageReadFileOptions,
-  StorageRmdirOptions,
-  StorageRmOptions,
-  StorageStats,
-  StorageWriteFileOptions,
-} from '../interfaces';
-import { StorageDriver } from '../interfaces/storage-driver.interface';
-import { fsError, rmDirectoryError } from './fs-error';
+  DriverMkdirOptions,
+  DriverReaddirOptions,
+  DriverReadStreamOptions,
+  DriverRmdirOptions,
+  DriverRmOptions,
+  DriverWriteFileOptions,
+  StorageDriver,
+} from '../interfaces/storage-driver.interface';
+import { createFsError, createRmDirectoryError } from './fs-error';
 import { remotePath } from './remote-path';
-import { defined, encodeNames, readdirOptions, readFileOptions, splitBucket, writeFileOptions } from './options';
-import { buildStats } from './stats';
+import { defined } from './options';
+import { createStats } from './stats';
 
 /** SFTP status codes that ssh2 puts into `error.code` (the others are not told apart by this driver) */
 const SFTP_NO_SUCH_FILE = 2;
@@ -266,12 +263,12 @@ export class SftpDriver implements StorageDriver {
       return error;
     }
     if (error.code === SFTP_PERMISSION_DENIED) {
-      return fsError('EACCES', syscall, p, dest);
+      return createFsError('EACCES', syscall, p, dest);
     }
     if (error.code === SFTP_NO_SUCH_FILE) {
       // OpenSSH reports a file as a parent folder (ENOTDIR) as "no such file" too
       const belowFile = await this.isBelowFile(sftp, p).catch(() => false);
-      return fsError(belowFile ? 'ENOTDIR' : 'ENOENT', syscall, p, dest);
+      return createFsError(belowFile ? 'ENOTDIR' : 'ENOENT', syscall, p, dest);
     }
     return error;
   }
@@ -299,14 +296,12 @@ export class SftpDriver implements StorageDriver {
 
   // --- folders ---
 
-  /** Unlike `fs.promises.mkdir`, `recursive` defaults to `true`. */
-  async mkdir(folderPath: string, options?: StorageMkdirOptions): Promise<string | undefined> {
-    const recursive = options?.recursive ?? true;
+  async mkdir(folderPath: string, { recursive, mode }: DriverMkdirOptions): Promise<string | undefined> {
     const full = this.sftpPath(folderPath);
 
     return this.withSftp(async (sftp) => {
       if (!recursive) {
-        await this.mkdirOne(sftp, full, options?.mode);
+        await this.mkdirOne(sftp, full, mode);
         return undefined;
       }
       // The folders that are missing, outermost first
@@ -315,7 +310,7 @@ export class SftpDriver implements StorageDriver {
         const existing = await this.statOrUndefined(sftp, current);
         if (existing) {
           if (!isDirectory(existing)) {
-            throw fsError(current === full ? 'EEXIST' : 'ENOTDIR', 'mkdir', full);
+            throw createFsError(current === full ? 'EEXIST' : 'ENOTDIR', 'mkdir', full);
           }
           break;
         }
@@ -327,7 +322,7 @@ export class SftpDriver implements StorageDriver {
         current = parent;
       }
       for (const folder of missing) {
-        await this.mkdirOne(sftp, folder, options?.mode).catch(async (error) => {
+        await this.mkdirOne(sftp, folder, mode).catch(async (error) => {
           // Created meanwhile by a concurrent call
           if (
             error?.code !== 'EEXIST' ||
@@ -350,17 +345,16 @@ export class SftpDriver implements StorageDriver {
       }
       // "failure" is what a server says for a path that exists already
       if (await this.statOrUndefined(sftp, folder)) {
-        throw fsError('EEXIST', 'mkdir', folder);
+        throw createFsError('EEXIST', 'mkdir', folder);
       }
       throw await this.fsFailure(sftp, error, 'mkdir', folder);
     }
   }
 
-  async readdir(folderPath: string, options?: BufferEncoding | StorageReaddirOptions): Promise<string[]> {
-    const { recursive, encoding } = readdirOptions(options);
+  async readdir(folderPath: string, { recursive }: DriverReaddirOptions): Promise<string[]> {
     const full = this.sftpPath(folderPath);
 
-    return encodeNames(await this.withSftp((sftp) => this.list(sftp, full, recursive), true), encoding);
+    return this.withSftp((sftp) => this.list(sftp, full, recursive), true);
   }
 
   /** The names in `folder`, with `recursive` the relative paths of everything below it (folders included). */
@@ -373,7 +367,7 @@ export class SftpDriver implements StorageDriver {
         // opendir on a file is "no such file" too
         const existing = await this.statOrUndefined(sftp, folder);
         if (existing && !isDirectory(existing)) {
-          throw fsError('ENOTDIR', 'scandir', folder);
+          throw createFsError('ENOTDIR', 'scandir', folder);
         }
       }
       throw await this.fsFailure(sftp, error, 'scandir', folder);
@@ -389,11 +383,9 @@ export class SftpDriver implements StorageDriver {
     return names;
   }
 
-  /** Unlike `fs.promises.rmdir`, `recursive` defaults to `true` (like `fs.promises.rm(path, { recursive: true })`). */
-  async rmdir(folderPath: string, options?: StorageRmdirOptions): Promise<void> {
-    const recursive = options?.recursive ?? true;
+  async rmdir(folderPath: string, { recursive }: DriverRmdirOptions): Promise<void> {
     if (recursive) {
-      return this.rm(folderPath, { recursive: true });
+      return this.rm(folderPath, { force: false, recursive: true });
     }
     const full = this.sftpPath(folderPath);
 
@@ -410,13 +402,13 @@ export class SftpDriver implements StorageDriver {
       // Servers answer "failure" or "no such file" for a file, and "failure" for a folder with content
       const existing = await this.statOrUndefined(sftp, folder, true);
       if (!existing) {
-        throw fsError('ENOENT', 'rmdir', folder);
+        throw createFsError('ENOENT', 'rmdir', folder);
       }
       if (!isDirectory(existing)) {
-        throw fsError('ENOTDIR', 'rmdir', folder);
+        throw createFsError('ENOTDIR', 'rmdir', folder);
       }
       if (!(await this.isEmptyFolder(sftp, folder))) {
-        throw fsError('ENOTEMPTY', 'rmdir', folder);
+        throw createFsError('ENOTEMPTY', 'rmdir', folder);
       }
       throw error;
     }
@@ -435,9 +427,9 @@ export class SftpDriver implements StorageDriver {
     return this.withSftp(async (sftp) => {
       const stats = await this.statOrUndefined(sftp, full);
       if (!stats) {
-        throw fsError('ENOENT', 'stat', full);
+        throw createFsError('ENOENT', 'stat', full);
       }
-      return buildStats({
+      return createStats({
         mode: stats.mode,
         size: stats.size,
         mtime: new Date(stats.mtime * 1000),
@@ -457,17 +449,10 @@ export class SftpDriver implements StorageDriver {
     return this.withSftp(async (sftp) => !!(await this.statOrUndefined(sftp, full)), true);
   }
 
-  async readFile(
-    filePath: string,
-    options: BufferEncoding | (StorageReadFileOptions & { encoding: BufferEncoding }),
-  ): Promise<string>;
-  async readFile(filePath: string, options?: (StorageReadFileOptions & { encoding?: null }) | null): Promise<Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer>;
-  async readFile(filePath: string, options?: BufferEncoding | StorageReadFileOptions | null): Promise<string | Buffer> {
-    const { fsOptions } = readFileOptions(options);
+  async readFile(filePath: string): Promise<Buffer> {
     const full = this.sftpPath(filePath);
 
-    const data = await this.withSftp(async (sftp) => {
+    return this.withSftp(async (sftp) => {
       const chunks: Buffer[] = [];
       try {
         const source: Readable = sftp.createReadStream(full);
@@ -481,7 +466,6 @@ export class SftpDriver implements StorageDriver {
       }
       return Buffer.concat(chunks);
     }, true);
-    return fsOptions.encoding ? data.toString(fsOptions.encoding) : data;
   }
 
   /** What a failed read of `full` is in Node terms (a read stream reports "no such file" at open, "failure" at read). */
@@ -489,21 +473,15 @@ export class SftpDriver implements StorageDriver {
     if (isSftpStatus(error) && !(error.code === SFTP_NO_SUCH_FILE || error.code === SFTP_PERMISSION_DENIED)) {
       const existing = await this.statOrUndefined(sftp, full).catch(() => undefined);
       if (existing && isDirectory(existing)) {
-        return fsError('EISDIR', 'read', full);
+        return createFsError('EISDIR', 'read', full);
       }
       return error;
     }
     return this.fsFailure(sftp, error, 'open', full);
   }
 
-  async writeFile(
-    filePath: string,
-    data: string | Buffer | Uint8Array,
-    options?: BufferEncoding | StorageWriteFileOptions,
-  ): Promise<void> {
-    const { encoding, mode, flag } = writeFileOptions(options);
+  async writeFile(filePath: string, buffer: Buffer, { mode, flag }: DriverWriteFileOptions): Promise<void> {
     const full = this.sftpPath(filePath);
-    const buffer = typeof data === 'string' ? Buffer.from(data, encoding) : data;
 
     return this.withSftp((sftp) => this.upload(sftp, full, Readable.from([buffer]), flag ?? 'w', mode));
   }
@@ -526,37 +504,29 @@ export class SftpDriver implements StorageDriver {
       // "failure" is what a server says for opening a folder, or an existing file with the exclusive flag
       const existing = await this.statOrUndefined(sftp, full).catch(() => undefined);
       if (existing) {
-        return fsError(isDirectory(existing) ? 'EISDIR' : 'EEXIST', 'open', full);
+        return createFsError(isDirectory(existing) ? 'EISDIR' : 'EEXIST', 'open', full);
       }
       return error;
     }
     return this.fsFailure(sftp, error, 'open', full, dest);
   }
 
-  async getSignedUrl(): Promise<string> {
-    throw new Error('Signed URLs are not supported for sftp storage.');
-  }
-
-  async getSignedPutUrl(): Promise<string> {
-    throw new Error('Signed URLs are not supported for sftp storage.');
-  }
-
-  async rm(filePath: string, options?: StorageRmOptions): Promise<void> {
+  async rm(filePath: string, options: DriverRmOptions): Promise<void> {
     const full = this.sftpPath(filePath);
 
     return this.withSftp(async (sftp) => {
       const existing = await this.statOrUndefined(sftp, full, true);
       if (!existing) {
-        if (options?.force) {
+        if (options.force) {
           return;
         }
-        throw fsError('ENOENT', 'lstat', full);
+        throw createFsError('ENOENT', 'lstat', full);
       }
       if (!isDirectory(existing)) {
         return this.removeFile(sftp, full);
       }
-      if (!options?.recursive) {
-        throw rmDirectoryError(full);
+      if (!options.recursive) {
+        throw createRmDirectoryError(full);
       }
       return this.removeTree(sftp, full);
     });
@@ -598,18 +568,18 @@ export class SftpDriver implements StorageDriver {
     return this.withSftp(async (sftp) => {
       const source = await this.statOrUndefined(sftp, from);
       if (!source) {
-        throw fsError('ENOENT', 'copyfile', from, to);
+        throw createFsError('ENOENT', 'copyfile', from, to);
       }
       if (isDirectory(source)) {
-        throw fsError('EISDIR', 'copyfile', from, to);
+        throw createFsError('EISDIR', 'copyfile', from, to);
       }
       const existing = await this.statOrUndefined(sftp, to);
       if (existing) {
         if (exclusive) {
-          throw fsError('EEXIST', 'copyfile', from, to);
+          throw createFsError('EEXIST', 'copyfile', from, to);
         }
         if (isDirectory(existing)) {
-          throw fsError('EISDIR', 'copyfile', from, to);
+          throw createFsError('EISDIR', 'copyfile', from, to);
         }
       }
       if (from === to) {
@@ -622,7 +592,7 @@ export class SftpDriver implements StorageDriver {
       } catch (error: any) {
         reader.destroy();
         // The upload reports its failures as errors of `open`; this is a `copyfile`
-        throw error?.syscall === 'open' ? fsError(error.code, 'copyfile', from, to) : error;
+        throw error?.syscall === 'open' ? createFsError(error.code, 'copyfile', from, to) : error;
       }
     });
   }
@@ -637,21 +607,21 @@ export class SftpDriver implements StorageDriver {
     return this.withSftp(async (sftp) => {
       const source = await this.statOrUndefined(sftp, from, true);
       if (!source) {
-        throw fsError('ENOENT', 'rename', from, to);
+        throw createFsError('ENOENT', 'rename', from, to);
       }
       if (from === to) {
         return;
       }
       if (isDirectory(source) && to.startsWith(from + '/')) {
-        throw fsError('EINVAL', 'rename', from, to);
+        throw createFsError('EINVAL', 'rename', from, to);
       }
       const target = await this.statOrUndefined(sftp, to, true);
       if (target) {
         if (isDirectory(target) !== isDirectory(source)) {
-          throw fsError(isDirectory(target) ? 'EISDIR' : 'ENOTDIR', 'rename', from, to);
+          throw createFsError(isDirectory(target) ? 'EISDIR' : 'ENOTDIR', 'rename', from, to);
         }
         if (isDirectory(target) && !(await this.isEmptyFolder(sftp, to))) {
-          throw fsError('ENOTEMPTY', 'rename', from, to);
+          throw createFsError('ENOTEMPTY', 'rename', from, to);
         }
       }
       try {
@@ -685,15 +655,11 @@ export class SftpDriver implements StorageDriver {
 
   // --- streams ---
 
-  createReadStream(filePath: string, options?: StorageCreateReadStreamOptions): Readable {
+  createReadStream(filePath: string, { start, end, highWaterMark }: DriverReadStreamOptions): Readable {
     const full = this.sftpPath(filePath);
-    const { start, end, highWaterMark, encoding } = splitBucket(options).fsOptions;
 
     // The connection is opened asynchronously: the caller gets a stream right away, fed once the file is open
     const output = new PassThrough({ highWaterMark });
-    if (encoding) {
-      output.setEncoding(encoding);
-    }
     let source: Readable | undefined;
     output.once('close', () => source?.destroy());
     this.withSftp(async (sftp) => {
@@ -708,9 +674,9 @@ export class SftpDriver implements StorageDriver {
   }
 
   /** `finish` is only emitted once the file is fully written and closed on the server. */
-  createWriteStream(filePath: string, options?: StorageCreateWriteStreamOptions): Writable {
+  createWriteStream(filePath: string, options: StorageCreateWriteStreamOptions): Writable {
     const full = this.sftpPath(filePath);
-    const flags = options?.flags ?? 'w';
+    const flags = options.flags ?? 'w';
     // eslint-disable-next-line @typescript-eslint/no-this-alias
     const driver = this;
     let target: Writable | undefined;
@@ -718,12 +684,12 @@ export class SftpDriver implements StorageDriver {
     let finished = false;
 
     const writable = new Writable({
-      highWaterMark: options?.highWaterMark,
-      defaultEncoding: options?.encoding,
+      highWaterMark: options.highWaterMark,
+      defaultEncoding: options.encoding,
       construct(callback) {
         driver.connection().then((connection) => {
           sftp = connection;
-          target = sftp.createWriteStream(full, defined({ flags, mode: options?.mode }));
+          target = sftp.createWriteStream(full, defined({ flags, mode: options.mode }));
           target!.on('error', async (error) =>
             writable.destroy((await driver.writeFailure(sftp, error, full, flags)) as Error),
           );

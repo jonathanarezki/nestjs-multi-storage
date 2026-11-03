@@ -48,7 +48,7 @@ async function cleanup(storage: Storage, backend: Backend, options: StorageModul
   if (backend.name === 'fileSystem') fs.rmSync(options.prefix!, { recursive: true, force: true });
 }
 
-const driverOf = (disk: StorageDisk): any => (disk as any).driver;
+const driverOf = (disk: StorageDisk): any => (disk as any).source.get();
 
 describe('createStorage: configuration', () => {
   it('a single-store config is the disk named "default"', async () => {

@@ -184,20 +184,11 @@ describeMemory('memory backend', () => {
   });
 
   describe('signed URLs', () => {
-    it('throw and name the memory type', async () => {
+    it('are not supported (ERR_STORAGE_NOT_SUPPORTED)', async () => {
       const { moduleRef, service } = await createModule();
-      await expect(service.getSignedUrl('a.txt')).rejects.toThrow('Signed URLs are not supported for memory storage.');
-      await expect(service.getSignedPutUrl('a.txt')).rejects.toThrow(
-        'Signed URLs are not supported for memory storage.',
-      );
+      await expect(service.getSignedUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
+      await expect(service.getSignedPutUrl('a.txt')).rejects.toMatchObject({ code: 'ERR_STORAGE_NOT_SUPPORTED' });
       await moduleRef.close();
-    });
-
-    it('still name the filesystem for the fileSystem type', async () => {
-      const service = new StorageService({ type: 'fileSystem', prefix: '/tmp' });
-      await expect(service.getSignedUrl('a.txt')).rejects.toThrow(
-        'Signed URLs are not supported for filesystem storage.',
-      );
     });
   });
 

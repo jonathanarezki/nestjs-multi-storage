@@ -1,0 +1,1 @@
+StorageDisk, createFsError, createRmDirectoryError, createStats, isStorageError, StorageModule, StorageService, InjectStorage, getStorageToken

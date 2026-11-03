@@ -1,14 +1,9 @@
-/** `bucket` overrides the configured bucket for one call. It is ignored in filesystem mode. */
-export interface StorageBucketOptions {
-  bucket?: string;
-}
-
-export interface StorageReadFileOptions extends StorageBucketOptions {
+export interface StorageReadFileOptions {
   encoding?: BufferEncoding | null;
   flag?: string;
 }
 
-export interface StorageWriteFileOptions extends StorageBucketOptions {
+export interface StorageWriteFileOptions {
   encoding?: BufferEncoding;
   mode?: number;
   flag?: string;
@@ -16,33 +11,33 @@ export interface StorageWriteFileOptions extends StorageBucketOptions {
   contentType?: string;
 }
 
-export interface StorageReaddirOptions extends StorageBucketOptions {
+export interface StorageReaddirOptions {
   recursive?: boolean;
   encoding?: BufferEncoding;
 }
 
-export interface StorageMkdirOptions extends StorageBucketOptions {
+export interface StorageMkdirOptions {
   recursive?: boolean;
   mode?: number;
 }
 
-export interface StorageRmdirOptions extends StorageBucketOptions {
+export interface StorageRmdirOptions {
   recursive?: boolean;
 }
 
-export interface StorageRmOptions extends StorageBucketOptions {
+export interface StorageRmOptions {
   force?: boolean;
   recursive?: boolean;
 }
 
-export interface StorageCreateReadStreamOptions extends StorageBucketOptions {
+export interface StorageCreateReadStreamOptions {
   start?: number;
   end?: number;
   highWaterMark?: number;
   encoding?: BufferEncoding;
 }
 
-export interface StorageCreateWriteStreamOptions extends StorageBucketOptions {
+export interface StorageCreateWriteStreamOptions {
   highWaterMark?: number;
   encoding?: BufferEncoding;
   /** Filesystem only */

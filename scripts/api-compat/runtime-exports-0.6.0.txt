@@ -1,1 +1,0 @@
-InjectStorage, StorageDisk, StorageModule, StorageService, getStorageToken, isStorageError
